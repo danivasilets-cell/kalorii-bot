@@ -8,6 +8,8 @@
 
 const tg = window.Telegram && window.Telegram.WebApp;
 const inTelegram = !!(tg && tg.initData);
+// Адрес бота на Cloudflare (для статистики владельца). Пусто — не отправлять.
+const API_URL = '';
 const cloud = inTelegram && tg.isVersionAtLeast && tg.isVersionAtLeast('6.9') ? tg.CloudStorage : null;
 
 // ---------- Утилиты ----------
@@ -243,51 +245,60 @@ function renderDiary() {
   const t = totalsOf(S.data.e);
   const left = g.kcal - t.k;
   const pct = Math.min(t.k / Math.max(g.kcal, 1), 1);
-  const C = 2 * Math.PI * 50;
+  const C = 2 * Math.PI * 52;
   const isToday = sameDay(S.day, startOfDay(new Date()));
-  const macro = (label, v, goal, color) => `<div class="macro"><div class="label">${label}</div>
-    <div class="bar"><i style="width:${Math.min(v / Math.max(goal, 1), 1) * 100}%;background:${v > goal * 1.1 ? 'var(--prot)' : color}"></i></div>
+  const macro = (label, v, goal, color) => `<div class="macro"><div class="label"><i style="background:${color}"></i>${label}</div>
+    <div class="bar"><i style="width:${Math.min(v / Math.max(goal, 1), 1) * 100}%;background:${v > goal * 1.1 ? '#fff' : color}"></i></div>
     <div class="nums">${n0(v)} / ${n0(goal)} г</div></div>`;
+
+  const cupsTotal = Math.min(16, Math.max(4, Math.round(g.water / 250)));
+  const cupsOn = Math.round(S.data.w / 250);
+  const cups = Array.from({ length: cupsTotal }, (_, i) => `<button class="cup ${i < cupsOn ? 'on' : ''}" data-a="waterSet" data-n="${i + 1}" aria-label="${(i + 1) * 250} мл"></button>`).join('');
 
   const meals = MEALS.map((m) => {
     const items = S.data.e.map((e, i) => ({ e, i })).filter((x) => x.e.m === m.id);
     const sum = totalsOf(items.map((x) => x.e)).k;
-    return `<div class="section-h"><span>${m.i} ${m.t}</span><span>${items.length ? n0(sum) + ' ккал' : ''}</span></div>
-      <div class="list">
+    return `<div class="list meal">
+        <div class="meal-h"><div class="badge">${m.i}</div><div class="name">${m.t}</div>
+          <div class="kcal">${items.length ? `${n0(sum)} <span>ккал</span>` : ''}</div></div>
         ${items.map(({ e, i }) => { const x = per(e, e.g); return `<button class="row" data-a="edit" data-i="${i}">
-          <div class="main"><div class="title">${esc(e.n)}</div><div class="sub">${n0(e.g)} г · Б ${n1(x.p)} Ж ${n1(x.f)} У ${n1(x.c)}</div></div>
+          <div class="main"><div class="title">${esc(e.n)}</div><div class="sub">${n0(e.g)} г · Б ${n1(x.p)} · Ж ${n1(x.f)} · У ${n1(x.c)}</div></div>
           <div class="val">${n0(x.k)}</div></button>`; }).join('')}
-        <button class="row add" data-a="add" data-m="${m.id}">＋ Добавить</button>
+        <button class="row add" data-a="add" data-m="${m.id}"><span class="plus">+</span>Добавить</button>
       </div>`;
   }).join('');
 
+  const subtitle = isToday ? `${WEEKDAYS[S.day.getDay()]}, ${dateText(S.day)}` : WEEKDAYS[S.day.getDay()];
   return `<div class="top">
+      <h1><span class="sub-title">${subtitle}</span>${dayTitle(S.day)}</h1>
+      ${isToday ? '' : '<button class="pill-btn" data-a="today">Сегодня</button>'}
       <button class="icon-btn" data-a="prevDay" aria-label="Предыдущий день">‹</button>
-      <h1>${dayTitle(S.day)}</h1>
-      ${isToday ? '' : '<button class="link-btn" data-a="today">Сегодня</button>'}
       <button class="icon-btn" data-a="nextDay" aria-label="Следующий день" ${isToday ? 'disabled' : ''}>›</button>
     </div>
-    <div class="card">
+    <div class="hero">
       <div class="summary">
         <div class="ring">
-          <svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="50" fill="none" stroke="var(--kcal)" stroke-opacity=".15" stroke-width="13"/>
-          <circle cx="60" cy="60" r="50" fill="none" stroke="${left < 0 ? 'var(--prot)' : 'var(--kcal)'}" stroke-width="13" stroke-linecap="round"
-            stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct)}" style="transition:stroke-dashoffset .4s"/></svg>
-          <div class="center"><div class="big">${n0(Math.abs(left))}</div><div class="small">${left >= 0 ? 'осталось' : 'сверх нормы'}</div></div>
+          <svg viewBox="0 0 120 120">
+            <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="12"/>
+            <circle cx="60" cy="60" r="52" fill="none" stroke="${left < 0 ? '#ffd1da' : '#fff'}" stroke-width="12" stroke-linecap="round"
+              stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct)}" style="transition:stroke-dashoffset .5s;filter:drop-shadow(0 0 6px rgba(255,255,255,.6))"/>
+          </svg>
+          <div class="center"><div class="big">${n0(Math.abs(left))}</div><div class="small">${left >= 0 ? 'ккал осталось' : 'сверх нормы'}</div></div>
         </div>
         <div>
-          <div class="stat"><div class="label">Съедено</div><div class="value">${n0(t.k)} ккал</div></div>
-          <div class="stat"><div class="label">Норма</div><div class="value">${n0(g.kcal)} ккал</div></div>
+          <div class="stat"><div class="label">Съедено</div><div class="value">${n0(t.k)} <span>ккал</span></div></div>
+          <div class="stat"><div class="label">Норма</div><div class="value">${n0(g.kcal)} <span>ккал</span></div></div>
         </div>
       </div>
-      <div class="macros">${macro('Белки', t.p, g.protein, 'var(--prot)')}${macro('Жиры', t.f, g.fat, 'var(--fat)')}${macro('Углеводы', t.c, g.carbs, 'var(--carb)')}</div>
+      <div class="macros">${macro('Белки', t.p, g.protein, 'var(--prot)')}${macro('Жиры', t.f, g.fat, 'var(--fat)')}${macro('Углев.', t.c, g.carbs, 'var(--carb)')}</div>
     </div>
-    <div class="card water">
-      <span style="font-size:24px">💧</span>
-      <div class="main"><div>Вода: ${n0(S.data.w)} из ${n0(g.water)} мл</div>
-        <div class="bar"><i style="width:${Math.min(S.data.w / Math.max(g.water, 1), 1) * 100}%;background:var(--water)"></i></div></div>
-      <button class="round-btn" style="color:var(--hint)" data-a="waterMinus" ${S.data.w <= 0 ? 'disabled' : ''} aria-label="Минус стакан">−</button>
-      <button class="round-btn" style="color:var(--water)" data-a="waterPlus" aria-label="Плюс стакан">+</button>
+    <div class="card">
+      <div class="water-head">
+        <div class="main"><b>💧 Вода</b><div class="sub">${n0(S.data.w)} из ${n0(g.water)} мл</div></div>
+        <button class="round-btn" data-a="waterMinus" ${S.data.w <= 0 ? 'disabled' : ''} aria-label="Минус стакан">−</button>
+        <button class="round-btn" data-a="waterPlus" aria-label="Плюс стакан">+</button>
+      </div>
+      <div class="cups">${cups}</div>
     </div>
     ${meals}`;
 }
@@ -305,7 +316,7 @@ async function loadHistory() {
 function renderHistory() {
   if (!S.history) { loadHistory(); return `<div class="top"><h1>История</h1></div><div class="empty"><div class="spinner" style="margin:0 auto"></div></div>`; }
   const g = goals(S.profile);
-  if (!S.history.length) return `<div class="top"><h1>История</h1></div><div class="empty"><b>Пока пусто</b>Добавьте еду в дневник — здесь появится статистика.</div>`;
+  if (!S.history.length) return `<div class="top"><h1>История</h1></div><div class="empty"><div class="em">📊</div><b>Пока пусто</b>Добавьте еду в дневник — здесь появится статистика.</div>`;
 
   const today = startOfDay(new Date());
   const days = [];
@@ -318,16 +329,16 @@ function renderHistory() {
   const W = 340, H = 170, bw = W / 14;
   const y = (v) => H - 18 - (v / max) * (H - 28);
   const bars = days.map((x, i) => `<rect x="${i * bw + 3}" y="${y(x.k)}" width="${bw - 6}" height="${Math.max(0, H - 18 - y(x.k))}" rx="3"
-      fill="${x.k > g.kcal * 1.05 ? 'var(--fat)' : 'var(--kcal)'}"/>
+      fill="${x.k > g.kcal * 1.05 ? 'var(--fat)' : 'url(#barGrad)'}"/>
       ${i % 2 === 1 ? `<text x="${i * bw + bw / 2}" y="${H - 4}" text-anchor="middle">${x.d.getDate()}</text>` : ''}`).join('');
   const week = S.history.filter((x) => x.date >= addDays(today, -6) && x.t.k > 0);
   const avg = week.length ? week.reduce((s, x) => s + x.t.k, 0) / week.length : 0;
 
   return `<div class="top"><h1>История</h1></div>
     <div class="section-h"><span>Последние 2 недели</span></div>
-    <div class="card"><svg class="chart" viewBox="0 0 ${W} ${H}">${bars}
+    <div class="card"><svg class="chart" viewBox="0 0 ${W} ${H}"><defs><linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b8bff"/><stop offset="1" stop-color="#27c0f2"/></linearGradient></defs>${bars}
       <line x1="0" x2="${W}" y1="${y(g.kcal)}" y2="${y(g.kcal)}" stroke="var(--hint)" stroke-dasharray="5 4"/></svg></div>
-    ${week.length ? `<div class="footnote">В среднем за неделю: ${n0(avg)} ккал в день (норма ${n0(g.kcal)}).</div>` : ''}
+    ${week.length ? `<div class="stats3"><div><b>${n0(avg)}</b><span>в среднем, ккал</span></div><div><b>${n0(g.kcal)}</b><span>норма, ккал</span></div><div><b>${week.length}</b><span>дней из 7</span></div></div>` : ''}
     <div class="section-h"><span>По дням</span></div>
     <div class="list">${S.history.map((x) => `<button class="row" data-a="openDay" data-d="${isoDate(x.date)}">
       <div class="main"><div class="title">${WEEKDAYS[x.date.getDay()].replace(/^./, (c) => c.toUpperCase())}, ${dateText(x.date)}</div>
@@ -351,8 +362,10 @@ function renderWeight() {
     const line = pts.map((p, i) => `${i ? 'L' : 'M'}${px(p[0]).toFixed(1)},${py(p[1]).toFixed(1)}`).join(' ');
     chart = `<div class="card"><svg class="chart" viewBox="0 0 ${W} ${H}">
       <text x="0" y="${py(hi - 1) + 3}">${n0(hi - 1)}</text><text x="0" y="${py(lo + 1) + 3}">${n0(lo + 1)}</text>
-      <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
-      ${pts.map((p) => `<circle cx="${px(p[0])}" cy="${py(p[1])}" r="3.5" fill="var(--accent)"/>`).join('')}
+      <defs><linearGradient id="wArea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b8bff" stop-opacity=".28"/><stop offset="1" stop-color="#3b8bff" stop-opacity="0"/></linearGradient></defs>
+      <path d="${line} L${px(pts[pts.length - 1][0]).toFixed(1)},${H - 20} L${px(pts[0][0]).toFixed(1)},${H - 20} Z" fill="url(#wArea)"/>
+      <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+      ${pts.map((p) => `<circle cx="${px(p[0])}" cy="${py(p[1])}" r="4" fill="var(--card)" stroke="var(--accent)" stroke-width="2.5"/>`).join('')}
       <text x="24" y="${H - 4}">${dateText(parseIso(pts[0][0]))}</text>
       <text x="${W}" y="${H - 4}" text-anchor="end">${dateText(parseIso(pts[pts.length - 1][0]))}</text></svg></div>`;
   }
@@ -371,7 +384,7 @@ function renderWeight() {
     <div class="section-h"><span>Записи</span></div>
     <div class="list">${w.slice().reverse().map((x) => `<div class="row"><div class="main">${dateText(parseIso(x[0]))} ${parseIso(x[0]).getFullYear()}</div>
       <div class="val">${n1(x[1])} кг</div><button class="link-btn" style="color:var(--danger)" data-a="delWeight" data-d="${x[0]}" aria-label="Удалить">✕</button></div>`).join('')}</div>`
-    : `<div class="empty">Взвешивайтесь утром натощак раз в несколько дней — так график будет честнее.</div>`}`;
+    : `<div class="empty"><div class="em">⚖️</div>Взвешивайтесь утром натощак раз в несколько дней — так график будет честнее.</div>`}`;
 }
 
 // ---------- Экран «Профиль» (и анкета при первом запуске) ----------
@@ -387,11 +400,11 @@ function profileFormHTML(p) {
     </div>
     <div class="section-h"><span>Активность</span></div>
     <div class="list">${ACTIVITY.map((a) => `<button class="row" data-a="setP" data-k="activity" data-v="${a.id}">
-      <div class="main"><div class="title">${a.t}</div><div class="sub">${a.h}</div></div><div class="val" style="color:var(--accent)">${p.activity === a.id ? '✓' : ''}</div></button>`).join('')}</div>
+      <div class="main"><div class="title">${a.t}</div><div class="sub">${a.h}</div></div><div class="val accent">${p.activity === a.id ? '✓' : ''}</div></button>`).join('')}</div>
     <div class="section-h"><span>Цель</span></div>
     <div class="list">
       <div class="field">${segHTML('goal', GOALS.map((x) => [x.id, x.t]), p.goal)}</div>
-      <button class="row" data-a="setP" data-k="custom" data-v="${p.custom ? '' : '1'}"><div class="main">Задать норму вручную</div><div class="val" style="color:var(--accent)">${p.custom ? '✓' : ''}</div></button>
+      <button class="row" data-a="setP" data-k="custom" data-v="${p.custom ? '' : '1'}"><div class="main">Задать норму вручную</div><div class="val accent">${p.custom ? '✓' : ''}</div></button>
       ${p.custom ? `<div class="field"><label>Норма</label><input data-p="customKcal" inputmode="numeric" value="${p.customKcal}"><span class="unit">ккал</span></div>` : ''}
     </div>
     <div class="footnote" style="margin-top:-12px">${p.custom ? '' : goalNote}</div>
@@ -416,8 +429,8 @@ function renderProfile() {
 function onboardingSheet() {
   return {
     title: '', noBack: true,
-    render: () => `<div class="hero"><div class="logo">🥗</div><h2>Посчитаем вашу норму</h2>
-      <p>Заполните пару полей — приложение рассчитает калории и БЖУ на день. Всё можно поменять позже в профиле.</p></div>
+    render: () => `<div class="welcome"><div class="logo">🥗</div><h2>Посчитаем вашу норму</h2>
+      <p>Пара вопросов — и приложение рассчитает калории и БЖУ на день. Всё можно поменять позже в профиле.</p></div>
       ${profileFormHTML(S.profile)}<button class="btn" data-a="finishOnboarding">Начать</button>`,
     actions: {
       async finishOnboarding() { S.profile.onboarded = true; await saveProfile(); closeAllSheets(); render(); },
@@ -443,9 +456,9 @@ function addFoodSheet(meal) {
     pool = [];
     const q = st.q.trim();
     if (!q) {
-      return `<div class="list">
-          <button class="row add" data-a="barcode">▥ Найти по штрихкоду</button>
-          <button class="row add" data-a="manual">✎ Создать свой продукт</button></div>
+      return `<div class="quick">
+          <button data-a="barcode"><span>🔢</span>По штрихкоду<small>цифры с упаковки</small></button>
+          <button data-a="manual"><span>✍️</span>Свой продукт<small>КБЖУ с этикетки</small></button></div>
         ${S.custom.length ? `<div class="section-h"><span>Мои продукты</span></div><div class="list">${S.custom.map(row).join('')}</div>` : ''}
         ${S.recent.length ? `<div class="section-h"><span>Недавние</span></div><div class="list">${S.recent.map(row).join('')}</div>` : ''}
         <div class="section-h"><span>Базовые продукты</span></div><div class="list">${BUILTIN.map(row).join('')}</div>`;
@@ -455,10 +468,10 @@ function addFoodSheet(meal) {
     if (st.loading) online = `<div class="row"><div class="spinner"></div><div class="main" style="color:var(--hint)">Ищем в базе продуктов…</div></div>`;
     else if (st.error) online = `<div class="row"><div class="main" style="color:var(--hint)">${esc(st.error)}</div></div><button class="row add" data-a="search">Повторить</button>`;
     else if (st.results && st.searched === q) online = st.results.length ? st.results.map(row).join('') : `<div class="row"><div class="main" style="color:var(--hint)">Ничего не нашлось</div></div>`;
-    else online = `<button class="row add" data-a="search">🔍 Искать «${esc(q)}» в интернете</button>`;
+    else online = `<button class="row add" data-a="search"><span class="plus">🔍</span>Искать «${esc(q)}» в интернете</button>`;
     return `${loc.length ? `<div class="section-h"><span>Найдено</span></div><div class="list">${loc.map(row).join('')}</div>` : ''}
       <div class="section-h"><span>Open Food Facts</span></div><div class="list">${online}</div>
-      <div class="list"><button class="row add" data-a="manual">✎ Создать «${esc(q)}» вручную</button></div>`;
+      <div class="list"><button class="row add" data-a="manual"><span class="plus">✍️</span>Создать «${esc(q)}» вручную</button></div>`;
   };
   const update = () => { const el = document.getElementById('foodResults'); if (el) el.innerHTML = results(); };
   async function search() {
@@ -471,7 +484,8 @@ function addFoodSheet(meal) {
   }
   return {
     title: MEALS.find((m) => m.id === meal).t,
-    render: () => `<input class="search" id="foodSearch" type="search" enterkeyhint="search" placeholder="Продукт или бренд" value="${esc(st.q)}" autocomplete="off">
+    render: () => `<div class="search-wrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input class="search" id="foodSearch" type="search" enterkeyhint="search" placeholder="Продукт или бренд" value="${esc(st.q)}" autocomplete="off"></div>
       <div id="foodResults">${results()}</div>`,
     mount(el) {
       const input = el.querySelector('#foodSearch');
@@ -493,7 +507,7 @@ function amountSheet(food, meal) {
   const totals = () => totalsHTML(per(food, st.g));
   return {
     title: 'Количество',
-    render: () => `<div class="card"><div style="font-weight:600">${esc(food.n)}</div><div class="sub" style="color:var(--hint);font-size:13px">${esc(foodSub(food))}</div></div>
+    render: () => `<div class="card food-card"><div class="ic">🍽️</div><div><b>${esc(food.n)}</b><small>${esc(foodSub(food))}</small></div></div>
       <div class="list">
         <div class="field"><label>Вес</label><input id="grams" inputmode="decimal" value="${n1(st.g)}"><span class="unit">г</span></div>
         <div class="chips" style="padding-top:8px">${presets.map((v) => `<button class="chip ${v === st.g ? 'on' : ''}" data-a="preset" data-v="${v}">${v === food.s ? 'Порция ' : ''}${n0(v)} г</button>`).join('')}</div>
@@ -530,7 +544,7 @@ function editSheet(index) {
   const e = S.data.e[index];
   return {
     title: 'Запись',
-    render: () => `<div class="card"><div style="font-weight:600">${esc(e.n)}</div>${e.b ? `<div style="color:var(--hint);font-size:13px">${esc(e.b)}</div>` : ''}</div>
+    render: () => `<div class="card food-card"><div class="ic">🍽️</div><div><b>${esc(e.n)}</b>${e.b ? `<small>${esc(e.b)}</small>` : ''}</div></div>
       <div class="list">
         <div class="field"><label>Вес</label><input id="grams" inputmode="decimal" value="${n1(e.g)}"><span class="unit">г</span></div>
         <div class="field">${mealSeg(e.m)}</div>
@@ -646,6 +660,7 @@ const actions = {
   add(d) { openSheet(addFoodSheet(d.m)); },
   edit(d) { openSheet(editSheet(+d.i)); },
   async waterPlus() { S.data.w += 250; haptic(); render(); await saveDay(); },
+  async waterSet(d) { const n = +d.n; const cur = Math.round(S.data.w / 250); S.data.w = (cur === n ? n - 1 : n) * 250; haptic(); render(); await saveDay(); },
   async waterMinus() { S.data.w = Math.max(0, S.data.w - 250); haptic(); render(); await saveDay(); },
   async addWeight() {
     const kg = num($('#newWeight').value);
@@ -701,10 +716,11 @@ document.addEventListener('change', async (ev) => {
 
 // ---------- Запуск ----------
 async function init() {
+  applyTheme();
   if (tg) {
+    try { tg.onEvent('themeChanged', applyTheme); } catch {}
     try { tg.ready(); tg.expand(); } catch {}
     try { if (tg.isVersionAtLeast('7.7')) tg.disableVerticalSwipes(); } catch {}
-    try { tg.setHeaderColor('secondary_bg_color'); tg.setBackgroundColor('secondary_bg_color'); } catch {}
     try { tg.BackButton.onClick(() => { if (sheets.length) closeSheet(); }); } catch {}
   }
   $('#app').innerHTML = '<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>';
@@ -716,5 +732,14 @@ async function init() {
   await loadDay(new Date());
   render();
   if (!S.profile.onboarded) openSheet(onboardingSheet());
+  if (API_URL && inTelegram) fetch(API_URL + '/api/open', { method: 'POST', body: tg.initData }).catch(() => {});
+}
+
+function applyTheme() {
+  const dark = tg && tg.colorScheme ? tg.colorScheme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  const bg = dark ? '#0a1322' : '#edf4ff';
+  try { tg.setHeaderColor(bg); tg.setBackgroundColor(bg); } catch {}
+  try { if (tg.isVersionAtLeast('7.10')) tg.setBottomBarColor(bg); } catch {}
 }
 init();
