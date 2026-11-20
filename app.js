@@ -29,6 +29,7 @@ const parseIso = (s) => { const [y, m, d] = s.split('-').map(Number); return new
 const parse = (s, def) => { try { return s ? JSON.parse(s) : def; } catch { return def; } };
 const MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
 const WEEKDAYS = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
 const dateText = (d) => `${d.getDate()} ${MONTHS[d.getMonth()]}`;
 function dayTitle(d) {
   const t = startOfDay(new Date());
@@ -137,6 +138,9 @@ const S = {
   custom: [],
   weights: [], // [[YYYY-MM-DD, кг]]
   history: null, // кэш для вкладки «История»
+  prev: { e: [], w: 0 }, // предыдущий день — для «как вчера»
+  daySet: new Set(), // дни, в которые есть записи
+  ach: {}, // полученные достижения
 };
 
 // Еда: { n: название, b: бренд, k/p/f/c: на 100 г, s: порция, g: граммы, m: приём пищи, bc: штрихкод }
@@ -150,15 +154,17 @@ const plainFood = (f) => ({ n: f.n, b: f.b || undefined, k: +f.k, p: +f.p, f: +f
 
 async function loadDay(d) {
   S.day = startOfDay(d);
-  const key = dayKey(S.day);
-  const v = await Store.get([key]);
+  const key = dayKey(S.day), pk = dayKey(addDays(S.day, -1));
+  const v = await Store.get([key, pk]);
   S.data = parse(v[key], { e: [], w: 0 });
+  S.prev = parse(v[pk], { e: [], w: 0 });
 }
 async function saveDay() {
   const key = dayKey(S.day);
-  if (!S.data.e.length && !S.data.w) await Store.remove(key);
-  else await Store.set(key, JSON.stringify(S.data));
+  if (!S.data.e.length && !S.data.w) { S.daySet.delete(key); await Store.remove(key); }
+  else { S.daySet.add(key); await Store.set(key, JSON.stringify(S.data)); }
   S.history = null;
+  await checkAchievements();
 }
 async function saveProfile() { await Store.set('profile', JSON.stringify(S.profile)); }
 async function remember(food, g) {
@@ -253,25 +259,28 @@ function renderDiary() {
 
   const cupsTotal = Math.min(16, Math.max(4, Math.round(g.water / 250)));
   const cupsOn = Math.round(S.data.w / 250);
-  const cups = Array.from({ length: cupsTotal }, (_, i) => `<button class="cup ${i < cupsOn ? 'on' : ''}" data-a="waterSet" data-n="${i + 1}" aria-label="${(i + 1) * 250} мл"></button>`).join('');
+  const cups = Array.from({ length: cupsTotal }, (_, i) => `<button class="cup ${i < cupsOn ? 'on' : ''} ${i === cupsOn - 1 && S.popCup ? 'pop' : ''}" data-a="waterSet" data-n="${i + 1}" aria-label="${(i + 1) * 250} мл"></button>`).join('');
 
   const meals = MEALS.map((m) => {
     const items = S.data.e.map((e, i) => ({ e, i })).filter((x) => x.e.m === m.id);
     const sum = totalsOf(items.map((x) => x.e)).k;
+    const prevItems = (S.prev.e || []).filter((e) => e.m === m.id);
     return `<div class="list meal">
         <div class="meal-h"><div class="badge">${m.i}</div><div class="name">${m.t}</div>
           <div class="kcal">${items.length ? `${n0(sum)} <span>ккал</span>` : ''}</div></div>
         ${items.map(({ e, i }) => { const x = per(e, e.g); return `<button class="row" data-a="edit" data-i="${i}">
           <div class="main"><div class="title">${esc(e.n)}</div><div class="sub">${n0(e.g)} г · Б ${n1(x.p)} · Ж ${n1(x.f)} · У ${n1(x.c)}</div></div>
           <div class="val">${n0(x.k)}</div></button>`; }).join('')}
+        ${!items.length && prevItems.length ? `<button class="row copy" data-a="copyMeal" data-m="${m.id}"><span class="plus soft">↺</span>Как вчера · ${prevItems.length} ${plural(prevItems.length, 'продукт', 'продукта', 'продуктов')}, ${n0(totalsOf(prevItems).k)} ккал</button>` : ''}
         <button class="row add" data-a="add" data-m="${m.id}"><span class="plus">+</span>Добавить</button>
       </div>`;
   }).join('');
 
-  const subtitle = isToday ? `${WEEKDAYS[S.day.getDay()]}, ${dateText(S.day)}` : WEEKDAYS[S.day.getDay()];
+  const st = streak();
+  const subtitle = cap(isToday ? `${WEEKDAYS[S.day.getDay()]}, ${dateText(S.day)}` : WEEKDAYS[S.day.getDay()]);
   return `<div class="top">
       <h1><span class="sub-title">${subtitle}</span>${dayTitle(S.day)}</h1>
-      ${isToday ? '' : '<button class="pill-btn" data-a="today">Сегодня</button>'}
+      ${isToday ? `<button class="streak-chip ${st ? '' : 'off'}" data-a="streakInfo">🔥 ${st}</button>` : '<button class="pill-btn" data-a="today">Сегодня</button>'}
       <button class="icon-btn" data-a="prevDay" aria-label="Предыдущий день">‹</button>
       <button class="icon-btn" data-a="nextDay" aria-label="Следующий день" ${isToday ? 'disabled' : ''}>›</button>
     </div>
@@ -279,11 +288,13 @@ function renderDiary() {
       <div class="summary">
         <div class="ring">
           <svg viewBox="0 0 120 120">
-            <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="12"/>
-            <circle cx="60" cy="60" r="52" fill="none" stroke="${left < 0 ? '#ffd1da' : '#fff'}" stroke-width="12" stroke-linecap="round"
-              stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct)}" style="transition:stroke-dashoffset .5s;filter:drop-shadow(0 0 6px rgba(255,255,255,.6))"/>
+            <defs><linearGradient id="ringG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="${left < 0 ? '#ffc2cf' : '#b8f1ff'}"/></linearGradient></defs>
+            <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(255,255,255,.2)" stroke-width="11"/>
+            <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(255,255,255,.12)" stroke-width="1" stroke-dasharray="2 5"/>
+            <circle cx="60" cy="60" r="52" fill="none" stroke="url(#ringG)" stroke-width="11" stroke-linecap="round"
+              stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct)}" style="transition:stroke-dashoffset .8s cubic-bezier(.2,.8,.2,1);filter:drop-shadow(0 0 8px rgba(255,255,255,.7))"/>
           </svg>
-          <div class="center"><div class="big">${n0(Math.abs(left))}</div><div class="small">${left >= 0 ? 'ккал осталось' : 'сверх нормы'}</div></div>
+          <div class="center"><div class="big" data-count="${Math.round(Math.abs(left))}">${n0(lastCount)}</div><div class="small">${left >= 0 ? 'ккал осталось' : 'сверх нормы'}</div></div>
         </div>
         <div>
           <div class="stat"><div class="label">Съедено</div><div class="value">${n0(t.k)} <span>ккал</span></div></div>
@@ -300,6 +311,7 @@ function renderDiary() {
       </div>
       <div class="cups">${cups}</div>
     </div>
+    ${isToday ? `<div class="card tip"><div class="ic">💡</div><div><b>Совет дня</b><p>${esc(tipOfDay())}</p></div></div>` : ''}
     ${meals}`;
 }
 
@@ -338,12 +350,34 @@ function renderHistory() {
     <div class="section-h"><span>Последние 2 недели</span></div>
     <div class="card"><svg class="chart" viewBox="0 0 ${W} ${H}"><defs><linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b8bff"/><stop offset="1" stop-color="#27c0f2"/></linearGradient></defs>${bars}
       <line x1="0" x2="${W}" y1="${y(g.kcal)}" y2="${y(g.kcal)}" stroke="var(--hint)" stroke-dasharray="5 4"/></svg></div>
+    <div class="section-h"><span>Календарь</span><span>5 недель</span></div>
+    <div class="card">${heatmapHTML(g)}</div>
     ${week.length ? `<div class="stats3"><div><b>${n0(avg)}</b><span>в среднем, ккал</span></div><div><b>${n0(g.kcal)}</b><span>норма, ккал</span></div><div><b>${week.length}</b><span>дней из 7</span></div></div>` : ''}
     <div class="section-h"><span>По дням</span></div>
     <div class="list">${S.history.map((x) => `<button class="row" data-a="openDay" data-d="${isoDate(x.date)}">
       <div class="main"><div class="title">${WEEKDAYS[x.date.getDay()].replace(/^./, (c) => c.toUpperCase())}, ${dateText(x.date)}</div>
       <div class="sub">Б ${n0(x.t.p)} · Ж ${n0(x.t.f)} · У ${n0(x.t.c)} · вода ${n0(x.w)} мл</div></div>
       <div class="val" style="${x.t.k > g.kcal * 1.05 ? 'color:var(--fat)' : ''}">${n0(x.t.k)} ккал</div></button>`).join('')}</div>`;
+}
+
+function heatmapHTML(g) {
+  const today = startOfDay(new Date());
+  const monday = addDays(today, -((today.getDay() + 6) % 7));
+  const start = addDays(monday, -28);
+  const byDay = new Map(S.history.map((x) => [isoDate(x.date), x.t.k]));
+  const cells = [];
+  for (let i = 0; i < 35; i++) {
+    const d = addDays(start, i);
+    const k = byDay.get(isoDate(d)) || 0;
+    const r = k / Math.max(g.kcal, 1);
+    let cls = !k ? '' : r > 1.1 ? 'over' : r >= 0.85 ? 'l3' : r >= 0.5 ? 'l2' : 'l1';
+    if (sameDay(d, today)) cls += ' today';
+    if (d > today) cls += ' future';
+    cells.push(`<i class="${cls}" title="${dateText(d)}: ${n0(k)} ккал"></i>`);
+  }
+  return `<div class="heat">${['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'].map((w) => `<div class="wd">${w}</div>`).join('')}${cells.join('')}</div>
+    <div class="legend"><span><i style="background:rgba(42,116,245,.28)"></i>мало</span><span><i style="background:rgba(42,116,245,.55)"></i>половина</span>
+    <span><i style="background:var(--grad)"></i>в норме</span><span><i style="background:linear-gradient(135deg,#ffcf5c,#ff9a3d)"></i>перебор</span></div>`;
 }
 
 // ---------- Экран «Вес» ----------
@@ -423,17 +457,27 @@ function segHTML(key, options, current) {
   return `<div class="seg">${options.map(([v, t]) => `<button data-a="setP" data-k="${key}" data-v="${v}" class="${v === current ? 'on' : ''}">${t}</button>`).join('')}</div>`;
 }
 function renderProfile() {
-  return `<div class="top"><h1>Профиль</h1></div>${profileFormHTML(S.profile)}
+  const got = Object.keys(S.ach).length;
+  const u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+  return `<div class="top"><h1><span class="sub-title">${u ? esc(u.first_name) + ' · ' : ''}прогресс и настройки</span>Профиль</h1></div>
+    <div class="stats3">
+      <div><b>🔥 ${streak()}</b><span>серия сейчас</span></div>
+      <div><b>${bestStreak()}</b><span>рекорд, дней</span></div>
+      <div><b>${S.daySet.size}</b><span>дней в дневнике</span></div>
+    </div>
+    <div class="section-h"><span>Достижения</span><span>${got} из ${ACH.length}</span></div>
+    <div class="card"><div class="badges">${ACH.map((a) => `<button class="badge-item ${S.ach[a.id] ? 'on' : ''}" data-a="badge" data-id="${a.id}"><div class="medal">${a.i}</div><span>${a.t}</span></button>`).join('')}</div></div>
+    ${profileFormHTML(S.profile)}
     <div class="footnote">Записи хранятся в вашем облаке Telegram и видны только вам. База продуктов — Open Food Facts (ODbL).</div>`;
 }
 function onboardingSheet() {
   return {
     title: '', noBack: true,
-    render: () => `<div class="welcome"><div class="logo">🥗</div><h2>Посчитаем вашу норму</h2>
+    render: () => `<div class="welcome"><div class="logo">${LOGO}</div><h2>Посчитаем вашу норму</h2>
       <p>Пара вопросов — и приложение рассчитает калории и БЖУ на день. Всё можно поменять позже в профиле.</p></div>
       ${profileFormHTML(S.profile)}<button class="btn" data-a="finishOnboarding">Начать</button>`,
     actions: {
-      async finishOnboarding() { S.profile.onboarded = true; await saveProfile(); closeAllSheets(); render(); },
+      async finishOnboarding() { S.profile.onboarded = true; await saveProfile(); closeAllSheets(); render(); celebrate(); toast(`Ваша норма: ${n0(goals(S.profile).kcal)} ккал в день 🎉`); },
     },
   };
 }
@@ -629,11 +673,161 @@ function manualSheet(meal, init) {
         const food = { n: name, b: st.b.trim() || undefined, bc: st.bc.trim() || undefined, k, p: num(st.p), f: num(st.f), c: num(st.c), s: num(st.s) || undefined };
         S.custom = fitList([food, ...S.custom.filter((x) => foodKey(x) !== foodKey(food))]);
         await Store.set('custom', JSON.stringify(S.custom));
+        checkAchievements();
         sheets.pop();
         openSheet(amountSheet(food, meal));
       },
     },
   };
+}
+
+// ---------- Фирменные мелочи: логотип, советы, серия, достижения, конфетти, приветствие ----------
+const LOGO = `<svg viewBox="0 0 48 48" aria-hidden="true"><defs><linearGradient id="logoG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6fe0ff"/><stop offset="1" stop-color="#2a63f5"/></linearGradient></defs>
+  <rect width="48" height="48" rx="15" fill="url(#logoG)"/>
+  <circle cx="24" cy="24" r="13" fill="none" stroke="rgba(255,255,255,.28)" stroke-width="4.5"/>
+  <path d="M24 11a13 13 0 1 1-12.6 9.8" fill="none" stroke="#fff" stroke-width="4.5" stroke-linecap="round"/>
+  <path d="M24.5 30.5c-4.6-.6-7-4-6.2-8.8 4.8-.6 8 2 8.4 6.4.1.9-.1 1.7-.5 2.4z" fill="#fff"/></svg>`;
+
+const TIPS = [
+  'Стакан воды перед едой помогает не переесть.',
+  'Белок в каждом приёме пищи дольше сохраняет сытость.',
+  'Взвешивайтесь в одно и то же время — утром, натощак.',
+  'Записывайте еду сразу, а не вечером — так точнее.',
+  'Половина тарелки — овощи, четверть — белок, четверть — гарнир.',
+  'Сон меньше 7 часов усиливает аппетит на следующий день.',
+  'Масло — самый незаметный источник калорий: 1 ложка ≈ 90 ккал.',
+  'Сладкие напитки — пустые калории. Попробуйте воду с лимоном.',
+  'Медленная еда: сигнал сытости приходит через 15–20 минут.',
+  'Колебания веса ±1 кг за день — это вода, а не жир.',
+  'Перекус с белком (творог, йогурт) лучше, чем печенье.',
+  'Планируйте ужин заранее — меньше соблазна заказать доставку.',
+  'Прогулка 30 минут ≈ 120–150 ккал и отличное настроение.',
+  'Не морите себя голодом: слишком жёсткий дефицит тормозит прогресс.',
+  'Соусы и заправки тоже считаются — их легко забыть.',
+  'Держите полезный перекус под рукой: орехи, фрукты, йогурт.',
+  'Один «плохой» день ничего не портит. Важна неделя целиком.',
+  'Клетчатка из овощей и круп помогает пищеварению и сытости.',
+  'Алкоголь — 7 ккал на грамм и сильный стимулятор аппетита.',
+  'Сравнивайте себя с собой месяц назад, а не с другими.',
+  'Готовьте больше белка впрок — курица, яйца, творог.',
+  'Фрукты лучше есть целиком, а не пить соком.',
+];
+const tipOfDay = () => TIPS[Math.floor(startOfDay(new Date()).getTime() / 864e5) % TIPS.length];
+const plural = (n, a, b, c) => { const m = n % 10, h = n % 100; return m === 1 && h !== 11 ? a : m >= 2 && m <= 4 && (h < 10 || h >= 20) ? b : c; };
+function suggestedMeal() {
+  const h = new Date().getHours();
+  return h >= 4 && h < 11 ? 'b' : h < 16 ? 'l' : h < 22 ? 'd' : 's';
+}
+
+// Серия: дни подряд, в которые были записи (сегодня ещё можно успеть).
+const hasDay = (d) => S.daySet.has(dayKey(d));
+function streak() {
+  let d = startOfDay(new Date());
+  if (!hasDay(d)) d = addDays(d, -1);
+  let n = 0;
+  while (hasDay(d)) { n++; d = addDays(d, -1); }
+  return n;
+}
+function bestStreak() {
+  let best = 0, cur = 0, prev = null;
+  for (const k of [...S.daySet].sort()) {
+    const d = keyToDate(k);
+    cur = prev && sameDay(addDays(prev, 1), d) ? cur + 1 : 1;
+    best = Math.max(best, cur);
+    prev = d;
+  }
+  return best;
+}
+
+const ACH = [
+  { id: 'first', i: '🍽️', t: 'Первый шаг', d: 'Добавить первую запись', ok: () => S.data.e.length > 0 },
+  { id: 's3', i: '🔥', t: 'Разгон', d: '3 дня подряд', ok: () => streak() >= 3 },
+  { id: 's7', i: '⚡', t: 'Неделя', d: '7 дней подряд', ok: () => streak() >= 7 },
+  { id: 's30', i: '👑', t: 'Легенда', d: '30 дней подряд', ok: () => streak() >= 30 },
+  { id: 'water', i: '💧', t: 'Водный баланс', d: 'Выпить норму воды за день', ok: () => S.data.w >= goals(S.profile).water },
+  { id: 'target', i: '🎯', t: 'В точку', d: 'Съесть 90–110% нормы калорий', ok: () => { const r = totalsOf(S.data.e).k / goals(S.profile).kcal; return r >= 0.9 && r <= 1.1; } },
+  { id: 'protein', i: '💪', t: 'Белковый день', d: 'Выполнить норму белка', ok: () => totalsOf(S.data.e).p >= goals(S.profile).protein },
+  { id: 'early', i: '🐦', t: 'Ранняя пташка', d: 'Записать завтрак до 9 утра', ok: () => S.data.e.some((e) => e.m === 'b' && e.t && new Date(e.t).getHours() < 9) },
+  { id: 'scale', i: '⚖️', t: 'На весах', d: 'Записать свой вес', ok: () => S.weights.length > 0 },
+  { id: 'chef', i: '👨‍🍳', t: 'Шеф', d: 'Создать свой продукт', ok: () => S.custom.length > 0 },
+  { id: 'gourmet', i: '🍱', t: 'Гурман', d: 'Попробовать 10 разных продуктов', ok: () => S.recent.length >= 10 },
+  { id: 'loyal', i: '💎', t: 'Постоянство', d: 'Вести дневник 14 дней', ok: () => S.daySet.size >= 14 },
+];
+async function checkAchievements() {
+  const fresh = ACH.filter((a) => !S.ach[a.id] && a.ok());
+  if (!fresh.length) return;
+  fresh.forEach((a) => { S.ach[a.id] = Date.now(); });
+  celebrate();
+  haptic('success');
+  toast(`🏆 ${fresh[0].i} ${fresh[0].t} — ${fresh[0].d.toLowerCase()}${fresh.length > 1 ? ` (+${fresh.length - 1})` : ''}`);
+  if (S.tab === 'profile' && !sheets.length) render();
+  await Store.set('ach', JSON.stringify(S.ach));
+}
+
+function celebrate() {
+  const c = $('#confetti');
+  const ctx = c.getContext('2d');
+  const W = innerWidth, H = innerHeight, dpr = devicePixelRatio || 1;
+  c.width = W * dpr; c.height = H * dpr; ctx.scale(dpr, dpr);
+  const colors = ['#2a74f5', '#1fc3ee', '#6fe0ff', '#8a6bff', '#ffcf5c', '#ff6b8b'];
+  const parts = Array.from({ length: 140 }, () => ({
+    x: W / 2 + (Math.random() - 0.5) * 120, y: H * 0.38,
+    vx: (Math.random() - 0.5) * 14, vy: -Math.random() * 13 - 5,
+    r: 5 + Math.random() * 6, c: colors[(Math.random() * colors.length) | 0],
+    rot: Math.random() * 6, vr: (Math.random() - 0.5) * 0.35, sq: Math.random() < 0.6,
+  }));
+  const t0 = performance.now();
+  (function frame(now) {
+    ctx.clearRect(0, 0, W, H);
+    for (const p of parts) {
+      p.vy += 0.32; p.vx *= 0.99; p.x += p.vx; p.y += p.vy; p.rot += p.vr;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillStyle = p.c;
+      if (p.sq) ctx.fillRect(-p.r / 2, -p.r / 4, p.r, p.r / 2); else { ctx.beginPath(); ctx.arc(0, 0, p.r / 2.4, 0, 7); ctx.fill(); }
+      ctx.restore();
+    }
+    if (now - t0 < 2800) requestAnimationFrame(frame); else ctx.clearRect(0, 0, W, H);
+  })(t0);
+}
+
+// Плавный счётчик для больших чисел.
+let lastCount = 0;
+function animateCounts() {
+  const el = document.querySelector('[data-count]');
+  if (!el) return;
+  const to = +el.dataset.count, from = lastCount, t0 = performance.now(), dur = 650;
+  lastCount = to;
+  if (from === to) return;
+  (function step(now) {
+    const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = n0(from + (to - from) * e);
+    if (k < 1) requestAnimationFrame(step);
+  })(t0);
+}
+
+function showWelcome() {
+  const el = $('#welcome');
+  const u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+  const name = (u && u.first_name) || 'Друг';
+  const h = new Date().getHours();
+  const [greet, emoji] = h >= 5 && h < 12 ? ['Доброе утро', '☀️'] : h >= 12 && h < 17 ? ['Добрый день', '🌤'] : h >= 17 && h < 23 ? ['Добрый вечер', '🌆'] : ['Доброй ночи', '🌙'];
+  const d = new Date();
+  const g = goals(S.profile), t = totalsOf(S.data.e), st = streak();
+  const first = !S.profile.onboarded;
+  const delay = (s) => `style="animation-delay:${s}s"`;
+  el.innerHTML = `<div class="orb a"></div><div class="orb b"></div>
+    <div class="w-logo up">${LOGO}Калории</div>
+    <div class="w-greet up" ${delay(0.05)}>${greet} ${emoji}</div>
+    <div class="w-name up" ${delay(0.12)}>${esc(name)}</div>
+    <div class="w-date up" ${delay(0.18)}>${cap(WEEKDAYS[d.getDay()])}, ${dateText(d)}</div>
+    ${first
+      ? `<div class="w-tip up" ${delay(0.26)}><b>Добро пожаловать</b>Посчитаем вашу норму калорий и БЖУ — это меньше минуты. Дальше просто добавляйте еду.</div>`
+      : `<div class="w-stats up" ${delay(0.26)}>
+          <div><b>${st ? '🔥 ' + st : '—'}</b><span>${st ? plural(st, 'день', 'дня', 'дней') + ' подряд' : 'начните серию'}</span></div>
+          <div><b>${n0(Math.max(0, g.kcal - t.k))}</b><span>ккал осталось</span></div>
+          <div><b>${Object.keys(S.ach).length}/${ACH.length}</b><span>достижений</span></div></div>
+        <div class="w-tip up" ${delay(0.34)}><b>💡 Совет дня</b>${esc(tipOfDay())}</div>`}
+    <button class="btn up" ${delay(0.42)} data-a="closeWelcome">${first ? 'Начать' : 'Открыть дневник'}</button>`;
+  el.hidden = false;
 }
 
 // ---------- Вкладки и общий рендер ----------
@@ -647,7 +841,21 @@ const TABS = [['diary', 'Дневник'], ['history', 'История'], ['weig
 function render() {
   const views = { diary: renderDiary, history: renderHistory, weight: renderWeight, profile: renderProfile };
   $('#app').innerHTML = views[S.tab]();
-  $('#tabs').innerHTML = TABS.map(([id, t]) => `<button class="${S.tab === id ? 'on' : ''}" data-a="tab" data-t="${id}"><svg viewBox="0 0 24 24">${TAB_ICONS[id]}</svg>${t}</button>`).join('');
+  const tab = ([id, t]) => `<button class="tab ${S.tab === id ? 'on' : ''}" data-a="tab" data-t="${id}"><svg viewBox="0 0 24 24">${TAB_ICONS[id]}</svg>${t}</button>`;
+  $('#tabs').innerHTML = TABS.slice(0, 2).map(tab).join('') + '<button class="fab" data-a="quickAdd" aria-label="Добавить еду">+</button>' + TABS.slice(2).map(tab).join('');
+  if (S.tab === 'diary') animateCounts();
+  S.popCup = false;
+}
+
+async function setWater(ml) {
+  const goal = goals(S.profile).water;
+  const reached = S.data.w < goal && ml >= goal;
+  S.popCup = ml > S.data.w;
+  S.data.w = ml;
+  haptic(reached ? 'success' : undefined);
+  render();
+  if (reached) { celebrate(); toast('💧 Норма воды выполнена!'); }
+  await saveDay();
 }
 
 // ---------- Действия ----------
@@ -659,9 +867,29 @@ const actions = {
   async openDay(d) { await loadDay(parseIso(d.d)); S.tab = 'diary'; render(); window.scrollTo(0, 0); },
   add(d) { openSheet(addFoodSheet(d.m)); },
   edit(d) { openSheet(editSheet(+d.i)); },
-  async waterPlus() { S.data.w += 250; haptic(); render(); await saveDay(); },
-  async waterSet(d) { const n = +d.n; const cur = Math.round(S.data.w / 250); S.data.w = (cur === n ? n - 1 : n) * 250; haptic(); render(); await saveDay(); },
-  async waterMinus() { S.data.w = Math.max(0, S.data.w - 250); haptic(); render(); await saveDay(); },
+  async waterPlus() { await setWater(S.data.w + 250); },
+  async waterSet(d) { const n = +d.n; const cur = Math.round(S.data.w / 250); await setWater((cur === n ? n - 1 : n) * 250); },
+  async waterMinus() { await setWater(Math.max(0, S.data.w - 250)); },
+  quickAdd() { openSheet(addFoodSheet(suggestedMeal())); },
+  streakInfo() { const st = streak(); toast(st ? `🔥 ${st} ${plural(st, 'день', 'дня', 'дней')} подряд · рекорд ${bestStreak()}` : 'Добавьте еду сегодня — начнётся серия 🔥'); },
+  badge(d) { const a = ACH.find((x) => x.id === d.id); toast(`${a.i} ${a.t}: ${a.d}${S.ach[a.id] ? ' ✓' : ''}`); },
+  closeWelcome() {
+    const el = $('#welcome');
+    el.classList.add('hide');
+    setTimeout(() => { el.hidden = true; el.classList.remove('hide'); el.innerHTML = ''; }, 450);
+    haptic();
+    if (!S.profile.onboarded) openSheet(onboardingSheet());
+    else checkAchievements();
+  },
+  async copyMeal(d) {
+    const items = S.prev.e.filter((e) => e.m === d.m);
+    const now = Date.now();
+    items.forEach((e, i) => S.data.e.push({ ...e, t: now + i }));
+    haptic('success');
+    render();
+    toast(`Добавлено как вчера: ${items.length}`);
+    await saveDay();
+  },
   async addWeight() {
     const kg = num($('#newWeight').value);
     if (kg < 20 || kg > 400) return toast('Введите вес в килограммах');
@@ -674,6 +902,7 @@ const actions = {
     toast('Вес записан');
     await Store.set('weights', JSON.stringify(S.weights));
     await saveProfile();
+    await checkAchievements();
   },
   async delWeight(d) {
     S.weights = S.weights.filter((x) => x[0] !== d.d);
@@ -724,14 +953,16 @@ async function init() {
     try { tg.BackButton.onClick(() => { if (sheets.length) closeSheet(); }); } catch {}
   }
   $('#app').innerHTML = '<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>';
-  const v = await Store.get(['profile', 'recent', 'custom', 'weights']);
+  const [v, keys] = await Promise.all([Store.get(['profile', 'recent', 'custom', 'weights', 'ach']), Store.keys()]);
+  S.daySet = new Set(keys.filter((k) => /^d_\d{8}$/.test(k)));
+  S.ach = parse(v.ach, {});
   S.profile = { ...DEFAULT_PROFILE, ...parse(v.profile, {}) };
   S.recent = parse(v.recent, []);
   S.custom = parse(v.custom, []);
   S.weights = parse(v.weights, []);
   await loadDay(new Date());
   render();
-  if (!S.profile.onboarded) openSheet(onboardingSheet());
+  showWelcome();
   if (API_URL && inTelegram) fetch(API_URL + '/api/open', { method: 'POST', body: tg.initData }).catch(() => {});
 }
 
