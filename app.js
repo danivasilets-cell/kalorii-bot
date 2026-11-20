@@ -555,7 +555,7 @@ function renderProfile() {
     ${CFG.achievements ? achievementsHTML(got) : ''}
     <div class="section-h"><span>Настройки</span></div>
     <div class="list">
-      <div class="field"><span class="fic">🌐</span><label>Язык</label><div class="seg mini" data-notr>${LANGS.map(([v, t, f]) => `<button data-a="setLangBtn" data-v="${v}" class="${LANG === v ? 'on' : ''}">${f} ${v.toUpperCase()}</button>`).join('')}</div></div>
+      ${CFG.forceLang ? '' : `<div class="field"><span class="fic">🌐</span><label>Язык</label><div class="seg mini" data-notr>${LANGS.map(([v, t, f]) => `<button data-a="setLangBtn" data-v="${v}" class="${LANG === v ? 'on' : ''}">${f} ${v.toUpperCase()}</button>`).join('')}</div></div>`}
       <button class="row" data-a="setTarget"><div class="fic">🎯</div><div class="main"><div class="title">Цель по весу</div><div class="sub">${S.profile.target ? `${n1(S.profile.target)} кг` : 'не указана'}</div></div><span class="chev">›</span></button>
       <button class="row" data-a="invite"><div class="fic">🤝</div><div class="main"><div class="title">Пригласить друга</div><div class="sub">${S.profile.refCount ? `приглашено: ${S.profile.refCount}` : 'ссылка-приглашение'}</div></div><span class="chev">›</span></button>
       <button class="row" data-a="challenges"><div class="fic">🏁</div><div class="main"><div class="title">Челленджи с друзьями</div><div class="sub">вода, белок, без сладкого…</div></div><span class="chev">›</span></button>
@@ -1090,7 +1090,7 @@ function showWelcome() {
 }
 
 // ---------- Глобальные настройки (меняются владельцем в скрытой панели) ----------
-const APP_VERSION = '5.1';
+const APP_VERSION = '5.2';
 const DEFAULT_CONFIG = {
   title: 'Калории',
   theme: 'ice',
@@ -1106,6 +1106,7 @@ const DEFAULT_CONFIG = {
   foods: [],
   botLink: '',
   developer: 'Danya. Vas',
+  forceLang: '', // '' — выбор пользователя; 'uk' | 'ru' | 'en' — язык для всех
   tester: 'Не указано',
 };
 const THEMES = [
@@ -1142,8 +1143,18 @@ async function loadServerConfig(timeout = 4000) {
   } catch { return false; }
 }
 /** Применяет свежие настройки к уже открытому приложению (в т.ч. включает/выключает заглушку). */
+/** Если владелец задал язык для всех — включаем его. Возвращает true, если язык сменился. */
+function applyForcedLang() {
+  const f = CFG.forceLang;
+  if (!f || !LANGS.some(([v]) => v === f) || f === LANG) return false;
+  setLang(f);
+  if (S.profile) S.profile.lang = f;
+  startTranslator();
+  return true;
+}
 async function refreshConfig() {
   if (!(await loadServerConfig())) return;
+  applyForcedLang();
   const blocked = CFG.maintenance.on && !isAdmin();
   if (blocked) { closeAllSheets(); return showMaintenance(); }
   if (document.querySelector('.maint')) { render(); return; }
@@ -1294,6 +1305,9 @@ function adminSheet() {
         <div class="field"><textarea data-cfg="welcomeText" rows="2" placeholder="Своя фраза на экране приветствия (необязательно)">${esc(draft.welcomeText)}</textarea></div>
       </div>
 
+      <div class="section-h"><span>🌐 Язык для всех</span></div>
+      <div class="card"><div class="seg" data-notr>${[['', 'Выбор пользователя'], ['uk', '🇺🇦 UK'], ['ru', '💩 RU'], ['en', '🇬🇧 EN']].map(([v, t]) => `<button data-a="cfgSet" data-k="forceLang" data-v="${v}" class="${(draft.forceLang || '') === v ? 'on' : ''}">${t}</button>`).join('')}</div>
+        <p class="hint">Если выбран язык — он включится у всех пользователей при следующем открытии, а переключатель языка в профиле скроется. Бот тоже будет писать на этом языке.</p></div>
       <div class="section-h"><span>⚙️ Функции</span></div>
       <div class="list">
         ${sw('welcome', 'Экран приветствия', 'При каждом открытии')}
@@ -1606,6 +1620,7 @@ async function init() {
   for (const k of stripKeys) S.strip.set(k, totalsOf(parse(stripVals[k], { e: [] }).e || []).k);
   // Свежие настройки с сервера (не дольше 2,5 с) — чтобы заглушка и баннер работали сразу.
   await Promise.all([loadDay(new Date()), loadServerConfig(2500)]);
+  if (applyForcedLang()) saveProfile();
   if (CFG.maintenance.on && !isAdmin()) return showMaintenance();
   render();
   const deep = location.hash && location.hash.length > 1;

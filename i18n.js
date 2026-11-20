@@ -4,7 +4,7 @@
    Исходные строки в коде — на русском. Слой перевода заменяет фразы в интерфейсе
    (текст, placeholder, aria-label, title) на выбранный язык. Формат словаря: ru|uk|en
    ============================================================ */
-const LANGS = [['uk', 'Українська', '🇺🇦'], ['ru', 'Русский', '🇷🇺'], ['en', 'English', '🇬🇧']];
+const LANGS = [['uk', 'Українська', '🇺🇦'], ['ru', 'Русский', '💩'], ['en', 'English', '🇬🇧']];
 let LANG = (() => { try { return localStorage.getItem('kal_lang') || 'uk'; } catch { return 'uk'; } })();
 
 const UI_TR_RAW = `

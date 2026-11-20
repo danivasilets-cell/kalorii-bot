@@ -1103,6 +1103,8 @@ const CH_TITLES = {
 };
 const mapLangCode = (c) => (/^uk/.test(c || '') ? 'uk' : /^(ru|be|kk)/.test(c || '') ? 'ru' : c ? 'en' : 'uk');
 async function userLang(env, uid, from) {
+  const cfg = await env.DB.get('config', 'json');
+  if (cfg && BOT_TR[cfg.forceLang]) return cfg.forceLang;
   const { metadata } = await env.DB.getWithMetadata(`u:${uid}`);
   if (metadata && metadata.l && BOT_TR[metadata.l]) return metadata.l;
   return mapLangCode(from && from.language_code);
