@@ -27,6 +27,12 @@ export default {
     if (url.pathname === '/api/config' && req.method === 'GET') return cors(json((await env.DB.get('config', 'json')) || {}));
     if (url.pathname === '/api/config' && req.method === 'POST') return cors(await apiSaveConfig(req, env));
     if (url.pathname === '/api/stats' && req.method === 'POST') return cors(await apiStats(req, env));
+    if (url.pathname === '/api/admin/setup' && req.method === 'POST') {
+      const { error } = await ownerFromBody(req, env);
+      if (error) return cors(error);
+      const res = await setup(new URL(`${url.origin}/setup?secret=${encodeURIComponent(env.WEBHOOK_SECRET || '')}`), env);
+      return cors(json({ ok: res.status === 200, text: await res.text() }, 200));
+    }
     if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
       const routes = { '/api/ai/photo': apiAiPhoto, '/api/ai/parse': apiAiParse, '/api/ai/voice': apiAiVoice, '/api/ai/chat': apiAiChat, '/api/reminders': apiReminders, '/api/export': apiExport, '/api/log': apiLog,
         '/api/sync': apiSync, '/api/pending': apiPending, '/api/fast': apiFast, '/api/ref': apiRef, '/api/challenge': apiChallenge, '/api/share-photo': apiSharePhoto };

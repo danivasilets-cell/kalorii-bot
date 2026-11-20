@@ -1090,7 +1090,7 @@ function showWelcome() {
 }
 
 // ---------- Глобальные настройки (меняются владельцем в скрытой панели) ----------
-const APP_VERSION = '5.2';
+const APP_VERSION = '5.3';
 const DEFAULT_CONFIG = {
   title: 'Калории',
   theme: 'ice',
@@ -1107,6 +1107,7 @@ const DEFAULT_CONFIG = {
   botLink: '',
   developer: 'Danya. Vas',
   forceLang: '', // '' — выбор пользователя; 'uk' | 'ru' | 'en' — язык для всех
+  reloadToken: 0, // меняется кнопкой «Перезапустить у всех»
   tester: 'Не указано',
 };
 const THEMES = [
@@ -1119,6 +1120,7 @@ const mergeConfig = (c) => ({ ...DEFAULT_CONFIG, ...(c || {}), banner: { ...DEFA
 const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 let CFG = mergeConfig(parse(lsGet(API_URL ? 'kal_cfg_cache' : 'kal_cfg_local'), {}));
+let loadedCfgText = API_URL ? lsGet('kal_cfg_cache') : null; // настройки, применённые в этом окне
 const isAdmin = () => lsGet('kal_admin') === '1';
 
 function applyConfig() {
@@ -1135,7 +1137,8 @@ async function loadServerConfig(timeout = 4000) {
     clearTimeout(timer);
     if (!r.ok) return false;
     const text = JSON.stringify(await r.json());
-    if (text === lsGet('kal_cfg_cache')) return false;
+    if (text === loadedCfgText) return false;
+    loadedCfgText = text;
     lsSet('kal_cfg_cache', text);
     CFG = mergeConfig(JSON.parse(text));
     applyConfig();
@@ -1152,8 +1155,25 @@ function applyForcedLang() {
   startTranslator();
   return true;
 }
+let seenReload = null;
+/** Принудительный перезапуск: если владелец нажал «Перезапустить у всех» — перезагружаемся со свежей версией. */
+function checkForcedReload() {
+  const t = Number(CFG.reloadToken) || 0;
+  if (seenReload === null) { seenReload = t; return false; }
+  if (!t || t <= seenReload) return false;
+  seenReload = t;
+  try { toast('🔄 Обновляем приложение…'); } catch {}
+  setTimeout(() => {
+    const u = new URL(location.href);
+    u.searchParams.set('r', String(t));
+    u.hash = '';
+    location.replace(u.toString());
+  }, 900);
+  return true;
+}
 async function refreshConfig() {
   if (!(await loadServerConfig())) return;
+  if (checkForcedReload()) return;
   applyForcedLang();
   const blocked = CFG.maintenance.on && !isAdmin();
   if (blocked) { closeAllSheets(); return showMaintenance(); }
@@ -1183,7 +1203,7 @@ async function saveConfig(next) {
   try {
     const r = await fetch(API_URL + '/api/config', { method: 'POST', body: JSON.stringify({ initData: tg.initData, config: next }) });
     const j = await r.json();
-    if (j.ok) { lsSet('kal_cfg_cache', JSON.stringify(next)); CFG = mergeConfig(next); try { localStorage.removeItem('kal_cfg_local'); } catch {} }
+    if (j.ok) { lsSet('kal_cfg_cache', JSON.stringify(next)); loadedCfgText = JSON.stringify(next); CFG = mergeConfig(next); try { localStorage.removeItem('kal_cfg_local'); } catch {} }
     return j;
   } catch { return { ok: false, error: 'Нет связи с сервером' }; }
 }
@@ -1335,6 +1355,13 @@ function adminSheet() {
       ${st.msg ? `<div class="card admin-msg">${esc(st.msg)}</div>` : ''}
       <button class="btn" data-a="saveCfg" ${st.saving ? 'disabled' : ''}>${st.saving ? 'Сохраняем…' : API_URL ? 'Сохранить для всех' : 'Сохранить'}</button>
 
+      <div class="section-h"><span>🔄 Перезапуск</span></div>
+      <div class="list">
+        <button class="row" data-a="forceReload"><div class="fic">🔄</div><div class="main"><div class="title">Перезапустить у всех</div><div class="sub">Открытые приложения перезагрузятся в течение минуты и подтянут последнюю версию</div></div></button>
+        <button class="row" data-a="botResetup"><div class="fic">🤖</div><div class="main"><div class="title">Переподключить бота</div><div class="sub">Заново подключить вебхук, команды, описание и кнопку меню</div></div></button>
+      </div>
+      ${st.restartMsg ? `<div class="card admin-msg" style="white-space:pre-line;text-align:left">${esc(st.restartMsg)}</div>` : ''}
+
       <div class="section-h"><span>🧰 Инструменты (мои данные)</span></div>
       <div class="list">
         <button class="row" data-a="exportData"><div class="fic">📤</div><div class="main"><div class="title">Экспорт данных</div><div class="sub">Скопировать все записи в буфер</div></div></button>
@@ -1382,7 +1409,30 @@ function adminSheet() {
         haptic('success'); refreshSheet();
       },
       delFood(d) { draft.foods.splice(+d.i, 1); refreshSheet(); },
+      forceReload: lock(async () => {
+        if (!API_URL) return toast('Нужен подключённый сервер');
+        const ok = await new Promise((res) => { try { tg.showConfirm('Перезапустить приложение у всех пользователей?', res); } catch { res(window.confirm('Перезапустить приложение у всех пользователей?')); } });
+        if (!ok) return;
+        const next = { ...JSON.parse(JSON.stringify(CFG)), reloadToken: Date.now() };
+        st.restartMsg = 'Отправляем команду…'; refreshSheet();
+        const r = await saveConfig(next);
+        seenReload = next.reloadToken; // сам владелец не перезагружается
+        st.restartMsg = r.ok ? '✅ Готово. У всех, у кого открыто приложение, оно перезагрузится в течение минуты. Остальные получат свежую версию при следующем открытии.' : '⚠️ ' + (r.error || 'Ошибка');
+        if (r.ok) haptic('success');
+        refreshSheet();
+      }),
+      botResetup: lock(async () => {
+        if (!API_URL || !inTelegram) return toast('Доступно в Telegram с подключённым сервером');
+        st.restartMsg = 'Переподключаем бота…'; refreshSheet();
+        try {
+          const r = await fetch(API_URL + '/api/admin/setup', { method: 'POST', body: JSON.stringify({ initData: tg.initData }) }).then((x) => x.json());
+          st.restartMsg = r.text || r.error || (r.ok ? '✅ Готово' : '⚠️ Ошибка');
+          if (r.ok) haptic('success');
+        } catch { st.restartMsg = '⚠️ Нет связи с сервером'; }
+        refreshSheet();
+      }),
       async saveCfg() {
+        draft.reloadToken = CFG.reloadToken || 0;
         st.saving = true; st.msg = ''; refreshSheet();
         const r = await saveConfig(draft);
         st.saving = false;
@@ -1620,6 +1670,7 @@ async function init() {
   for (const k of stripKeys) S.strip.set(k, totalsOf(parse(stripVals[k], { e: [] }).e || []).k);
   // Свежие настройки с сервера (не дольше 2,5 с) — чтобы заглушка и баннер работали сразу.
   await Promise.all([loadDay(new Date()), loadServerConfig(2500)]);
+  checkForcedReload();
   if (applyForcedLang()) saveProfile();
   if (CFG.maintenance.on && !isAdmin()) return showMaintenance();
   render();
