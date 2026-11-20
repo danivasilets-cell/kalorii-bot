@@ -184,7 +184,7 @@ function totalsOf(entries) {
 }
 const foodSub = (f) => [f.b, `${n0(f.k)} ккал · Б ${n1(f.p)} Ж ${n1(f.f)} У ${n1(f.c)} на 100 г`].filter(Boolean).join(' · ');
 const foodKey = (f) => `${f.n.toLowerCase()}|${(f.b || '').toLowerCase()}`;
-const plainFood = (f) => ({ n: f.n, b: f.b || undefined, k: +f.k, p: +f.p, f: +f.f, c: +f.c, s: f.s || undefined, bc: f.bc || undefined, cat: f.cat != null ? f.cat : undefined });
+const plainFood = (f) => ({ n: f.n, b: f.b || undefined, k: +f.k, p: +f.p, f: +f.f, c: +f.c, s: f.s || undefined, bc: f.bc || undefined, cat: f.cat != null ? f.cat : undefined, pc: f.pc || undefined });
 
 async function loadDay(d) {
   S.day = startOfDay(d);
@@ -203,8 +203,9 @@ async function saveDay() {
   await checkAchievements();
 }
 async function saveProfile() { await Store.set('profile', JSON.stringify(S.profile)); }
-async function remember(food, g) {
+async function remember(food, g, st) {
   const f = { ...plainFood(food), lg: g };
+  if (st && st.u !== 'г') { f.lu = st.u; f.lq = st.q; if (st.u === 'шт' && st.pcw) f.lpc = st.pcw; }
   S.recent = fitList([f, ...S.recent.filter((r) => foodKey(r) !== foodKey(f))].slice(0, 40));
   await Store.set('recent', JSON.stringify(S.recent));
 }
@@ -315,7 +316,7 @@ function renderDiary() {
           <div class="kcal">${items.length ? `${n0(sum)} <span>ккал</span>` : ''}</div>
           ${items.length ? `<button class="dots" data-a="mealMenu" data-m="${m.id}" aria-label="Действия">⋯</button>` : ''}</div>
         ${items.map(({ e, i }) => { const x = per(e, e.g); return `<button class="row" data-a="edit" data-i="${i}">
-          <div class="main"><div class="title">${esc(e.n)}</div><div class="sub">${e.sv ? n1(e.sv) + ' порц.' : n0(e.g) + ' г'} · Б ${n1(x.p)} · Ж ${n1(x.f)} · У ${n1(x.c)}</div></div>
+          <div class="main"><div class="title">${esc(e.n)}</div><div class="sub">${qtyText(e)} · Б ${n1(x.p)} · Ж ${n1(x.f)} · У ${n1(x.c)}</div></div>
           <div class="val">${n0(x.k)}</div></button>`; }).join('')}
         ${CFG.copyMeal && !items.length && prevItems.length ? `<button class="row copy" data-a="copyMeal" data-m="${m.id}"><span class="plus soft">↺</span>Как вчера · ${prevItems.length} ${plural(prevItems.length, 'продукт', 'продукта', 'продуктов')}, ${n0(totalsOf(prevItems).k)} ккал</button>` : ''}
         <button class="row add" data-a="add" data-m="${m.id}"><span class="plus">+</span>Добавить</button>
@@ -567,6 +568,82 @@ function onboardingSheet() {
   };
 }
 
+// ---------- Единицы измерения: граммы, штуки, миллилитры, порции ----------
+const LIQUID_CATS = new Set(['Напитки', 'Алкоголь', 'Супы']);
+const COUNT_CATS = new Set(['Фрукты', 'Яйца', 'Хлеб и выпечка', 'Колбасы и мясные продукты', 'Сладкое', 'Фастфуд', 'Азиатская кухня', 'Готовые блюда', 'Орехи и семена', 'Ягоды', 'Овощи', 'Грибы']);
+const catName = (f) => (f && f.cat != null && CATEGORIES[f.cat] ? CATEGORIES[f.cat].name : '');
+const isLiquid = (f) => LIQUID_CATS.has(catName(f)) || /^(молоко|кефир|ряженка|айран|простокваша|йогурт питьевой|сок|морс|квас|компот|кисель|смузи|сливки|вода|чай|кофе|какао|бульон|лимонад|кола|энергетик|пиво|вино|шампанское|сидр|протеиновый коктейль|раф|латте|капучино|американо|эспрессо|флэт|матча|горячий шоколад|минеральная|кокосовая вода)/i.test(f.n);
+/** Плотность, г/мл: масла легче воды, мёд и сиропы тяжелее. */
+function density(f) {
+  const n = f.n.toLowerCase();
+  if (/^масло (подсолнечное|оливковое|кокосовое|льняное)/.test(n)) return 0.92;
+  if (/^(мёд|мед)/.test(n)) return 1.42;
+  if (/сироп|сгущ/.test(n)) return 1.3;
+  if (/^сливки 33|^сметана/.test(n)) return 1.0;
+  if (/^(молоко|кефир|ряженка|йогурт)/.test(n)) return 1.03;
+  return 1;
+}
+const pieceWeight = (f) => f.lpc || f.pc || f.s || 0;
+function unitsFor(f) {
+  if (f.rid || f.did) return ['порц', 'г'];
+  return ['г', 'шт', 'мл'];
+}
+function defaultUnit(f) {
+  if (f.rid || f.did) return 'порц';
+  if (f.lu && unitsFor(f).includes(f.lu)) return f.lu;
+  if (isLiquid(f)) return 'мл';
+  if (f.pc || (f.s && COUNT_CATS.has(catName(f)))) return 'шт';
+  return 'г';
+}
+const UNIT_LABEL = { г: 'г', шт: 'шт', мл: 'мл', порц: 'порц.' };
+/** Сколько граммов в одной единице. */
+function unitFactor(f, u, pcw) {
+  if (u === 'шт') return pcw || pieceWeight(f) || 100;
+  if (u === 'мл') return density(f);
+  if (u === 'порц') return f.s || 100;
+  return 1;
+}
+const roundQty = (u, q) => (u === 'г' || u === 'мл' ? Math.round(q) : Math.round(q * 10) / 10);
+/** Подпись количества записи в дневнике: «2 шт», «250 мл», «1 порц.», «150 г». */
+function qtyText(e) {
+  if (e.u === 'шт' && e.q) return `${n1(e.q)} шт`;
+  if (e.u === 'мл' && e.q) return `${n0(e.q)} мл`;
+  if ((e.u === 'порц' && e.q) || e.sv) return `${n1(e.q || e.sv)} порц.`;
+  return `${n0(e.g)} г`;
+}
+function qtyPresets(f, u) {
+  if (u === 'шт') return [1, 2, 3, 4, 5];
+  if (u === 'мл') return [100, 200, 250, 330, 500];
+  if (u === 'порц') return [0.5, 1, 1.5, 2];
+  return [...new Set([f.s, 50, 100, 150, 200, 300].filter(Boolean))];
+}
+/** Общий блок «количество + единица» для окон добавления и редактирования. st = { u, q, pcw } */
+function qtyBlockHTML(f, st) {
+  const g = st.q * unitFactor(f, st.u, st.pcw);
+  return `<div class="field qty"><label>Количество</label>
+      <input id="qtyIn" inputmode="decimal" value="${n1(st.q)}">
+      <div class="seg units">${unitsFor(f).map((u) => `<button data-a="unit" data-u="${u}" class="${st.u === u ? 'on' : ''}">${UNIT_LABEL[u]}</button>`).join('')}</div></div>
+    ${st.u === 'шт' ? `<div class="field pcw"><label>1 шт ≈</label><input id="pcwIn" inputmode="decimal" value="${n1(st.pcw || pieceWeight(f) || 100)}"><span class="unit">г</span></div>` : ''}
+    <div class="chips" style="padding-top:8px">${qtyPresets(f, st.u).map((v) => `<button class="chip ${v === st.q ? 'on' : ''}" data-a="qpreset" data-v="${v}">${st.u === 'г' && v === f.s ? 'Порция ' : ''}${n1(v)} ${UNIT_LABEL[st.u]}</button>`).join('')}</div>
+    ${st.u !== 'г' ? `<div class="qty-eq" id="qtyEq">= ${n0(g)} г</div>` : ''}`;
+}
+/** Подключает поля количества; onChange(grams) вызывается при каждом изменении. */
+function bindQty(el, f, st, onChange) {
+  const eq = () => { const g = st.q * unitFactor(f, st.u, st.pcw); const x = el.querySelector('#qtyEq'); if (x) x.textContent = `= ${n0(g)} г`; onChange(g); };
+  const q = el.querySelector('#qtyIn');
+  if (q) q.addEventListener('input', () => { st.q = num(q.value); el.querySelectorAll('[data-a=qpreset]').forEach((c) => c.classList.toggle('on', +c.dataset.v === st.q)); eq(); });
+  const p = el.querySelector('#pcwIn');
+  if (p) p.addEventListener('input', () => { st.pcw = num(p.value); eq(); });
+}
+/** Переключение единицы с сохранением веса. */
+function switchUnit(f, st, u) {
+  const g = st.q * unitFactor(f, st.u, st.pcw);
+  st.u = u;
+  if (u === 'шт' && !st.pcw) st.pcw = pieceWeight(f) || 100;
+  st.q = roundQty(u, g / unitFactor(f, u, st.pcw)) || 1;
+}
+const gramsOf = (f, st) => st.q * unitFactor(f, st.u, st.pcw);
+
 // ---------- Добавление еды ----------
 // opts.pick(food, grams, meal) — режим выбора (для блюд, плана, замены); opts.query — начальный запрос.
 function addFoodSheet(meal, opts = {}) {
@@ -607,7 +684,7 @@ function addFoodSheet(meal, opts = {}) {
           ${opts.pick ? '' : '<button data-a="aiPhotoHere"><span>📷</span>Фото<small>ИИ распознает</small></button><button data-a="aiVoiceHere"><span>🎙</span>Голос / текст<small>«2 яйца и гречка»</small></button>'}
           <button data-a="barcode"><span>▥</span>Штрихкод<small>камерой</small></button>
           <button data-a="manual"><span>✍️</span>Свой продукт<small>КБЖУ с этикетки</small></button></div>
-        ${!opts.pick && last ? `<div class="list"><button class="row" data-a="pickLast"><div class="fic">↺</div><div class="main"><div class="title">Повторить последнее</div><div class="sub">${esc(last.n)} · ${n0(last.lg || last.s || 100)} г</div></div><span class="pill-btn">+ ${n0(per(last, last.lg || last.s || 100).k)} ккал</span></button></div>` : ''}
+        ${!opts.pick && last ? `<div class="list"><button class="row" data-a="pickLast"><div class="fic">↺</div><div class="main"><div class="title">Повторить последнее</div><div class="sub">${esc(last.n)} · ${last.lu ? qtyText({ u: last.lu, q: last.lq, g: last.lg }) : n0(last.lg || last.s || 100) + ' г'}</div></div><span class="pill-btn">+ ${n0(per(last, last.lg || last.s || 100).k)} ккал</span></button></div>` : ''}
         ${S.dishes.length ? `<div class="section-h"><span>⭐ Мои блюда</span></div><div class="list">${S.dishes.map((d) => row(dishAsFood(d))).join('')}</div>` : ''}
         ${fe.length ? `<div class="section-h"><span>⭐ Рекомендуем</span></div><div class="list">${fe.map(row).join('')}</div>` : ''}
         ${S.recent.length ? `<div class="section-h"><span>Недавние</span></div><div class="list">${S.recent.slice(0, 12).map(row).join('')}</div>` : ''}
@@ -659,46 +736,41 @@ function addFoodSheet(meal, opts = {}) {
 }
 
 function amountSheet(food, meal, opts = {}) {
-  const portion = food.rid || food.did; // рецепт или своё блюдо — считаем в порциях
-  const st = { g: food.lg || food.s || 100, meal };
-  const presets = portion
-    ? [0.5, 1, 1.5, 2].map((k) => Math.round((food.s || 100) * k))
-    : [...new Set([food.s, 50, 100, 150, 200, 300].filter(Boolean))];
-  const label = (v) => (portion ? `${n1(v / (food.s || 100))} порц.` : `${v === food.s ? 'Порция ' : ''}${n0(v)} г`);
-  const totals = () => totalsHTML(per(food, st.g));
+  const u0 = defaultUnit(food);
+  const pcw0 = food.lpc || pieceWeight(food) || 0;
+  const st = { u: u0, pcw: u0 === 'шт' ? pcw0 || 100 : pcw0, meal, q: 1 };
+  if (food.lu === u0 && food.lq) st.q = food.lq;
+  else if (u0 === 'г') st.q = food.lg || food.s || 100;
+  else if (u0 === 'мл') st.q = food.lg ? roundQty('мл', food.lg / density(food)) : 250;
+  else st.q = 1;
+  const totals = () => totalsHTML(per(food, gramsOf(food, st)));
   return {
     title: opts.pick ? 'Количество' : 'Добавить в дневник',
     render: () => `<div class="card food-card"><div class="ic">${food.emoji || (food.star ? '⭐' : catEmoji(food))}</div><div><b>${esc(food.n)}</b><small>${esc(foodSub(food))}</small></div></div>
-      <div class="list">
-        <div class="field"><label>Вес</label><input id="grams" inputmode="decimal" value="${n1(st.g)}"><span class="unit">г</span></div>
-        <div class="chips" style="padding-top:8px">${presets.map((v) => `<button class="chip ${v === st.g ? 'on' : ''}" data-a="preset" data-v="${v}">${label(v)}</button>`).join('')}</div>
-        <div class="field">${mealSeg(st.meal)}</div>
-      </div>
+      <div class="list">${qtyBlockHTML(food, st)}<div class="field">${mealSeg(st.meal)}</div></div>
       <div class="card" id="amountTotals">${totals()}</div>
-      ${portion ? '<p class="hint" style="text-align:center;margin-top:-6px">Порция рассчитана по ингредиентам блюда — значения приблизительные.</p>' : ''}
+      ${food.rid || food.did ? '<p class="hint" style="text-align:center;margin-top:-6px">Порция рассчитана по ингредиентам блюда — значения приблизительные.</p>' : ''}
+      ${st.u === 'мл' && density(food) !== 1 ? `<p class="hint" style="text-align:center;margin-top:-6px">1 мл ≈ ${n1(density(food))} г</p>` : ''}
       <button class="btn" data-a="addEntry">${opts.pick ? 'Выбрать' : 'Добавить в дневник'}</button>`,
-    mount(el) {
-      const input = el.querySelector('#grams');
-      input.addEventListener('input', () => {
-        st.g = num(input.value);
-        el.querySelector('#amountTotals').innerHTML = totals();
-        el.querySelectorAll('.chip').forEach((c) => c.classList.toggle('on', +c.dataset.v === st.g));
-      });
-    },
+    mount(el) { bindQty(el, food, st, () => { el.querySelector('#amountTotals').innerHTML = totals(); }); },
     actions: {
-      preset(d) { st.g = +d.v; refreshSheet(); },
+      unit(d) { switchUnit(food, st, d.u); haptic(); refreshSheet(); },
+      qpreset(d) { st.q = +d.v; refreshSheet(); },
       meal(d) { st.meal = d.m; refreshSheet(); },
       addEntry: lock(async () => {
-        if (!(st.g > 0) || st.g > 5000) return toast('Укажите вес от 1 до 5000 г');
-        if (opts.pick) return opts.pick(food, st.g, st.meal);
-        S.data.e.push({ ...plainFood(food), g: st.g, m: st.meal, t: Date.now(), sv: portion ? Math.round((st.g / (food.s || 100)) * 10) / 10 : undefined });
+        const g = Math.round(gramsOf(food, st) * 10) / 10;
+        if (!(g > 0) || g > 5000) return toast('Укажите количество (до 5 кг)');
+        if (st.u === 'шт' && !(st.pcw > 0)) return toast('Укажите вес одной штуки');
+        if (opts.pick) return opts.pick(food, g, st.meal);
+        const portion = st.u === 'порц';
+        S.data.e.push({ ...plainFood(food), g, m: st.meal, t: Date.now(), u: st.u === 'г' ? undefined : st.u, q: st.u === 'г' ? undefined : st.q, sv: portion ? st.q : undefined });
         S.profile.added = (S.profile.added || 0) + 1;
         haptic('success');
         closeAllSheets();
         render();
         toast('Добавлено');
         await saveDay();
-        if (!portion) await remember(food, st.g);
+        if (!(food.rid || food.did)) await remember(food, g, st);
         saveProfile();
       }),
     },
@@ -709,15 +781,22 @@ function editSheet(index) {
   const e = S.data.e[index];
   const time = e.t ? new Date(e.t) : new Date(S.day.getTime() + 12 * 3600e3);
   const hhmm = `${pad(time.getHours())}:${pad(time.getMinutes())}`;
+  const units = unitsFor(e);
+  const st = { u: e.u && units.includes(e.u) ? e.u : e.sv ? 'порц' : 'г', pcw: e.u === 'шт' && e.q ? e.g / e.q : pieceWeight(e) };
+  st.q = st.u === 'г' ? e.g : e.q || e.sv || roundQty(st.u, e.g / unitFactor(e, st.u, st.pcw));
+  const apply = () => {
+    e.g = Math.max(0, Math.min(5000, Math.round(gramsOf(e, st) * 10) / 10));
+    if (st.u === 'г') { delete e.u; delete e.q; delete e.sv; }
+    else { e.u = st.u; e.q = st.q; if (st.u === 'порц') e.sv = st.q; else delete e.sv; }
+  };
   return {
     title: 'Запись',
     render: () => `<div class="card food-card"><div class="ic">${catEmoji(e)}</div><div><b>${esc(e.n)}</b>${e.b ? `<small>${esc(e.b)}</small>` : ''}</div></div>
-      <div class="list">
-        <div class="field"><label>Вес</label><input id="grams" inputmode="decimal" value="${n1(e.g)}"><span class="unit">г</span></div>
+      <div class="list">${qtyBlockHTML(e, st)}
         <div class="field"><label>Время</label><input id="etime" type="time" value="${hhmm}"></div>
         <div class="field">${mealSeg(e.m)}</div>
       </div>
-      <div class="card" id="editTotals">${totalsHTML(per(e, e.g))}</div>
+      <div class="card" id="editTotals">${totalsHTML(per(e, gramsOf(e, st)))}</div>
       <button class="btn" data-a="done">Готово</button>
       <div class="quick">
         <button data-a="dup"><span>⧉</span>Повторить<small>ещё одна порция</small></button>
@@ -725,18 +804,20 @@ function editSheet(index) {
       </div>
       <button class="btn danger" data-a="del">Удалить запись</button>`,
     mount(el) {
-      const input = el.querySelector('#grams');
-      input.addEventListener('input', () => { e.g = Math.max(0, Math.min(5000, num(input.value))); if (e.sv) delete e.sv; el.querySelector('#editTotals').innerHTML = totalsHTML(per(e, e.g)); });
+      bindQty(el, e, st, (g) => { el.querySelector('#editTotals').innerHTML = totalsHTML(per(e, g)); });
       el.querySelector('#etime').addEventListener('change', (ev) => {
         const [h, m] = ev.target.value.split(':').map(Number);
         if (h >= 0) e.t = new Date(S.day.getFullYear(), S.day.getMonth(), S.day.getDate(), h, m).getTime();
       });
     },
     actions: {
+      unit(d) { switchUnit(e, st, d.u); haptic(); refreshSheet(); },
+      qpreset(d) { st.q = +d.v; refreshSheet(); },
       meal(d) { e.m = d.m; refreshSheet(); },
-      done: lock(async () => { if (!(e.g > 0)) return toast('Укажите вес'); closeAllSheets(); render(); await saveDay(); }),
-      dup: lock(async () => { S.data.e.push({ ...e, t: Date.now() }); haptic('success'); closeAllSheets(); render(); toast('Добавлена ещё порция'); await saveDay(); }),
+      done: lock(async () => { apply(); if (!(e.g > 0)) return toast('Укажите количество'); closeAllSheets(); render(); await saveDay(); }),
+      dup: lock(async () => { apply(); S.data.e.push({ ...e, t: Date.now() }); haptic('success'); closeAllSheets(); render(); toast('Добавлена ещё порция'); await saveDay(); }),
       async toFav() {
+        apply();
         await saveDish({ id: Date.now().toString(36), n: e.n, sv: 1, ing: [{ ...plainFood(e), g: e.g }] });
         haptic('success'); toast('⭐ Сохранено в избранное');
       },
@@ -979,7 +1060,7 @@ function showWelcome() {
 }
 
 // ---------- Глобальные настройки (меняются владельцем в скрытой панели) ----------
-const APP_VERSION = '4.0';
+const APP_VERSION = '4.1';
 const DEFAULT_CONFIG = {
   title: 'Калории',
   theme: 'ice',

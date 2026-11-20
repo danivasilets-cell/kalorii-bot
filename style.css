@@ -628,3 +628,12 @@ label.qbtn span { font-size: 24px; } label.qbtn small { color: var(--hint); font
 .rm-times { gap: 8px; flex-wrap: wrap; padding-left: 66px; }
 .rm-times input[type=time] { border: 0; border-radius: 10px; background: var(--card2); padding: 7px 8px; font: 700 15px var(--font-display); color: var(--text); }
 .field input[type=time] { width: auto; }
+
+/* v4.1: выбор единиц */
+.field.qty { flex-wrap: wrap; gap: 8px; }
+.field.qty label { flex: 0 0 auto; margin-right: auto; }
+.field.qty input { width: 84px; background: var(--card2); border-radius: 12px; padding: 8px 10px; text-align: right; }
+.seg.units { width: auto; flex: none; }
+.seg.units button { padding: 8px 12px; min-width: 44px; }
+.field.pcw input { width: 70px; }
+.qty-eq { text-align: right; padding: 0 18px 10px; color: var(--hint); font-weight: 700; font-size: 13px; margin-top: -4px; }

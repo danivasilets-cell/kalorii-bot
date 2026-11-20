@@ -213,15 +213,15 @@ async function exportFile(filename, content, caption) {
 }
 async function buildCsv(n) {
   const days = await loadDays(n);
-  const rows = [['Дата', 'Приём пищи', 'Продукт', 'Граммы', 'Ккал', 'Белки', 'Жиры', 'Углеводы', 'Вода за день, мл']];
+  const rows = [['Дата', 'Приём пищи', 'Продукт', 'Количество', 'Граммы', 'Ккал', 'Белки', 'Жиры', 'Углеводы', 'Вода за день, мл']];
   const MEAL = Object.fromEntries(MEALS.map((m) => [m.id, m.t]));
   const f1 = (v) => String(Math.round(v * 10) / 10).replace('.', ',');
   for (const d of days) {
     if (!d.e.length && !d.w) continue;
-    if (!d.e.length) rows.push([isoDate(d.date), '', '', '', '', '', '', '', d.w]);
-    d.e.forEach((e) => { const x = per(e, e.g); rows.push([isoDate(d.date), MEAL[e.m] || '', e.n, f1(e.g), f1(x.k), f1(x.p), f1(x.f), f1(x.c), d.w]); });
+    if (!d.e.length) rows.push([isoDate(d.date), '', '', '', '', '', '', '', '', d.w]);
+    d.e.forEach((e) => { const x = per(e, e.g); rows.push([isoDate(d.date), MEAL[e.m] || '', e.n, qtyText(e), f1(e.g), f1(x.k), f1(x.p), f1(x.f), f1(x.c), d.w]); });
   }
-  rows.push([]); rows.push(['Вес']); S.weights.forEach(([iso, kg]) => rows.push([iso, '', '', '', '', '', '', '', '', f1(kg)]));
+  rows.push([]); rows.push(['Вес']); S.weights.forEach(([iso, kg]) => rows.push([iso, '', '', '', '', '', '', '', '', '', f1(kg)]));
   return rows.map((r) => r.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(';')).join('\r\n');
 }
 async function buildReport(n) {
