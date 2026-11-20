@@ -8,7 +8,8 @@
  *   APP_URL         — (необязательно) адрес мини-приложения
  * Привязки (Bindings):
  *   DB              — KV namespace (хранит список пользователей)
- * Триггер (Triggers → Cron): "* * * * *" — нужен для рассылки.
+ *   AI              — Workers AI (для распознавания фото, голоса и ИИ-помощника)
+ * Триггер (Triggers → Cron): "* * * * *" — нужен для рассылки и напоминаний.
  *
  * После публикации откройте в браузере: https://<адрес-воркера>/setup?secret=<WEBHOOK_SECRET>
  */
@@ -26,6 +27,14 @@ export default {
     if (url.pathname === '/api/config' && req.method === 'GET') return cors(json((await env.DB.get('config', 'json')) || {}));
     if (url.pathname === '/api/config' && req.method === 'POST') return cors(await apiSaveConfig(req, env));
     if (url.pathname === '/api/stats' && req.method === 'POST') return cors(await apiStats(req, env));
+    if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
+      const routes = { '/api/ai/photo': apiAiPhoto, '/api/ai/parse': apiAiParse, '/api/ai/voice': apiAiVoice, '/api/ai/chat': apiAiChat, '/api/reminders': apiReminders, '/api/export': apiExport, '/api/log': apiLog };
+      const fn = routes[url.pathname];
+      if (fn) {
+        try { return cors(await fn(req, env)); }
+        catch (e) { console.log('api error', url.pathname, e && e.stack); return cors(json({ ok: false, error: 'Ошибка сервера' }, 500)); }
+      }
+    }
 
     if (url.pathname === '/setup') return setup(url, env);
 
@@ -42,7 +51,12 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(processBroadcast(env).catch((e) => console.log('broadcast error', e && e.stack)));
+    ctx.waitUntil((async () => {
+      // Бесплатный план — до 50 внешних запросов за запуск: сначала напоминания, остаток — рассылке.
+      let used = 0;
+      try { used = await processReminders(env, 45); } catch (e) { console.log('reminders error', e && e.stack); }
+      try { if (used < 40) await processBroadcast(env, 45 - used); } catch (e) { console.log('broadcast error', e && e.stack); }
+    })());
   },
 };
 
@@ -286,10 +300,10 @@ async function handleCallback(q, env, ctx) {
 }
 
 // ---------------- Рассылка (порциями по cron) ----------------
-async function processBroadcast(env) {
+async function processBroadcast(env, budget = BATCH) {
   const job = await env.DB.get('bc:job', 'json');
   if (!job) return;
-  const part = job.ids.slice(job.i, job.i + BATCH);
+  const part = job.ids.slice(job.i, job.i + Math.min(BATCH, budget));
   const blocked = [];
   for (const id of part) {
     const r = job.draft.text
@@ -434,4 +448,279 @@ async function setup(url, env) {
   return new Response(`${ok ? 'Готово! Бот настроен.' : 'Есть ошибки:'}\n\n${lines.join('\n')}`, {
     headers: { 'content-type': 'text/plain; charset=utf-8' },
   });
+}
+
+// =====================================================================
+//  v4: ИИ (Workers AI), напоминания, экспорт, журнал ошибок
+// =====================================================================
+
+/** Любой пользователь мини-приложения (подпись Telegram проверяется на сервере). */
+async function userFromBody(req, env, maxLen = 3_000_000) {
+  const text = await req.text();
+  if (text.length > maxLen) return { error: json({ ok: false, error: 'Слишком большой запрос' }, 413) };
+  let body;
+  try { body = JSON.parse(text); } catch { return { error: json({ ok: false, error: 'Неверный формат запроса' }, 400) }; }
+  const user = await verifyInitData(body.initData, env.BOT_TOKEN);
+  if (!user) return { error: json({ ok: false, error: 'Откройте приложение из Telegram' }, 401) };
+  return { body, user };
+}
+
+// ---------- Дневные лимиты ИИ на пользователя (чтобы не выйти за бесплатную квоту) ----------
+const AI_LIMITS = { photo: 15, chat: 40, parse: 60, voice: 30 };
+async function takeQuota(env, uid, kind) {
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const key = `q:${uid}:${day}`;
+  const q = (await env.DB.get(key, 'json')) || {};
+  const limit = isOwner(env, uid) ? AI_LIMITS[kind] * 5 : AI_LIMITS[kind];
+  if ((q[kind] || 0) >= limit) return false;
+  q[kind] = (q[kind] || 0) + 1;
+  await env.DB.put(key, JSON.stringify(q), { expirationTtl: 2 * 86400 });
+  return true;
+}
+
+const TEXT_MODELS = ['@cf/meta/llama-4-scout-17b-16e-instruct', '@cf/meta/llama-3.3-70b-instruct-fp8-fast', '@cf/meta/llama-3.1-8b-instruct'];
+
+async function runText(env, messages, max_tokens = 700) {
+  let lastErr;
+  for (const model of TEXT_MODELS) {
+    try {
+      const r = await env.AI.run(model, { messages, max_tokens, temperature: 0.4 });
+      const out = r && (r.response ?? (r.choices && r.choices[0] && r.choices[0].message && r.choices[0].message.content));
+      if (out) return typeof out === 'string' ? out : JSON.stringify(out);
+    } catch (e) { lastErr = e; console.log('text model failed', model, e && e.message); }
+  }
+  throw lastErr || new Error('Модель не ответила');
+}
+
+function extractJSON(text) {
+  if (!text) return null;
+  const s = String(text).replace(/```json|```/g, '');
+  for (const [open, close] of [['[', ']'], ['{', '}']]) {
+    const a = s.indexOf(open), b = s.lastIndexOf(close);
+    if (a >= 0 && b > a) { try { return JSON.parse(s.slice(a, b + 1)); } catch {} }
+  }
+  return null;
+}
+
+const FOOD_JSON_RULES =
+  'Ответ — ТОЛЬКО JSON-массив без пояснений. Каждый элемент: {"name": "название по-русски", "grams": число, "kcal": ккал на 100 г, "p": белки на 100 г, "f": жиры на 100 г, "c": углеводы на 100 г}. ' +
+  'Названия — простые, как в таблицах калорийности (например "Гречка варёная", "Куриная грудка жареная"). Вес — реалистичная оценка порции в граммах.';
+
+function cleanItems(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr.slice(0, 15).map((x) => ({
+    name: String(x.name || x.n || '').slice(0, 80),
+    grams: Math.max(0, Math.min(3000, Number(x.grams || x.g || 0) || 0)),
+    count: x.count != null ? Math.max(0, Math.min(50, Number(x.count) || 0)) : undefined,
+    meal: ['b', 'l', 'd', 's'].includes(x.meal) ? x.meal : undefined,
+    kcal: Number(x.kcal || x.k || 0) || 0,
+    p: Number(x.p || 0) || 0, f: Number(x.f || 0) || 0, c: Number(x.c || 0) || 0,
+  })).filter((x) => x.name);
+}
+
+function aiMissing() {
+  return json({ ok: false, error: 'ИИ не подключён: в Cloudflare добавьте привязку Workers AI с именем AI (Settings → Bindings).' }, 503);
+}
+
+async function apiAiPhoto(req, env) {
+  const { error, body, user } = await userFromBody(req, env, 4_000_000);
+  if (error) return error;
+  if (!env.AI) return aiMissing();
+  const b64 = String(body.image || '').replace(/^data:image\/\w+;base64,/, '');
+  if (b64.length < 1000) return json({ ok: false, error: 'Нет изображения' }, 400);
+  if (!(await takeQuota(env, user.id, 'photo'))) return json({ ok: false, error: `Лимит распознаваний на сегодня исчерпан (${AI_LIMITS.photo}). Попробуйте завтра.` }, 429);
+  const prompt = 'Ты — нутрициолог. Определи все блюда и продукты на фото еды и оцени вес каждой порции. ' + FOOD_JSON_RULES +
+    ' Если на фото нет еды — верни [].';
+  let text;
+  try {
+    // Основная модель: Llama 4 Scout (понимает изображения).
+    const r = await env.AI.run('@cf/meta/llama-4-scout-17b-16e-instruct', {
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } }] }],
+      max_tokens: 800, temperature: 0.2,
+    });
+    text = r && r.response;
+  } catch (e) { console.log('scout vision failed', e && e.message); }
+  if (!text) {
+    try {
+      const bytes = [...Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))];
+      const model = '@cf/meta/llama-3.2-11b-vision-instruct';
+      const run = () => env.AI.run(model, { prompt, image: bytes, max_tokens: 800 });
+      let r;
+      try { r = await run(); } catch (e) {
+        if (/agree/i.test(String(e && e.message))) { await env.AI.run(model, { prompt: 'agree' }); r = await run(); } else throw e;
+      }
+      text = r && r.response;
+    } catch (e) {
+      console.log('vision failed', e && e.stack);
+      return json({ ok: false, error: 'Не удалось распознать фото. Попробуйте ещё раз.' }, 502);
+    }
+  }
+  return json({ ok: true, items: cleanItems(extractJSON(text)) });
+}
+
+async function apiAiParse(req, env) {
+  const { error, body, user } = await userFromBody(req, env, 20000);
+  if (error) return error;
+  if (!env.AI) return aiMissing();
+  const text = String(body.text || '').slice(0, 600);
+  if (!text.trim()) return json({ ok: false, error: 'Пустой запрос' }, 400);
+  if (!(await takeQuota(env, user.id, 'parse'))) return json({ ok: false, error: 'Лимит на сегодня исчерпан' }, 429);
+  const sys = 'Ты разбираешь фразу пользователя о съеденной еде. ' +
+    'Ответ — ТОЛЬКО JSON-массив. Элемент: {"name": "продукт в именительном падеже, как в таблице калорийности", "grams": число или 0, "count": число штук или 0, "meal": "b"|"l"|"d"|"s"|null, "kcal": ккал на 100 г, "p": белки на 100 г, "f": жиры на 100 г, "c": углеводы на 100 г}. ' +
+    'meal: b — завтрак, l — обед, d — ужин, s — перекус; null, если не сказано. Если указаны штуки (два яйца) — заполни count, а grams — общий вес. Числа словами переводи в цифры.';
+  try {
+    const out = await runText(env, [{ role: 'system', content: sys }, { role: 'user', content: text }], 500);
+    return json({ ok: true, items: cleanItems(extractJSON(out)) });
+  } catch (e) {
+    console.log('parse failed', e && e.stack);
+    return json({ ok: false, error: 'ИИ временно недоступен' }, 502);
+  }
+}
+
+async function apiAiVoice(req, env) {
+  const { error, body, user } = await userFromBody(req, env, 6_000_000);
+  if (error) return error;
+  if (!env.AI) return aiMissing();
+  const b64 = String(body.audio || '').replace(/^data:[^,]+,/, '');
+  if (b64.length < 500) return json({ ok: false, error: 'Нет записи' }, 400);
+  if (!(await takeQuota(env, user.id, 'voice'))) return json({ ok: false, error: 'Лимит на сегодня исчерпан' }, 429);
+  try {
+    let r;
+    try { r = await env.AI.run('@cf/openai/whisper-large-v3-turbo', { audio: b64, language: 'ru' }); }
+    catch (e) {
+      console.log('whisper turbo failed', e && e.message);
+      r = await env.AI.run('@cf/openai/whisper', { audio: [...Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))] });
+    }
+    return json({ ok: true, text: String((r && r.text) || '').trim() });
+  } catch (e) {
+    console.log('voice failed', e && e.stack);
+    return json({ ok: false, error: 'Не удалось распознать речь' }, 502);
+  }
+}
+
+async function apiAiChat(req, env) {
+  const { error, body, user } = await userFromBody(req, env, 60000);
+  if (error) return error;
+  if (!env.AI) return aiMissing();
+  if (!(await takeQuota(env, user.id, 'chat'))) return json({ ok: false, error: `Лимит сообщений на сегодня исчерпан (${AI_LIMITS.chat}). Возвращайтесь завтра!` }, 429);
+  const ctxText = JSON.stringify(body.context || {}).slice(0, 4000);
+  const history = (Array.isArray(body.messages) ? body.messages : []).slice(-8)
+    .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content || '').slice(0, 1200) }))
+    .filter((m) => m.content);
+  if (!history.length) return json({ ok: false, error: 'Пустое сообщение' }, 400);
+  const sys = [
+    'Ты — дружелюбный ИИ-помощник по питанию в приложении «Калории». Отвечай по-русски, кратко и по делу (до 150 слов), используй списки и эмодзи умеренно.',
+    'Опирайся на данные пользователя (JSON ниже): цель, норму калорий и БЖУ, съеденное сегодня, историю и предпочтения. Считай остаток калорий из этих данных.',
+    'Все расчёты калорий — приблизительные, говори об этом, когда даёшь цифры. Не выдавай оценки за точные медицинские данные.',
+    'Ты не врач: не ставь диагнозы, не назначай лекарства и лечебные диеты. При болезнях, беременности, расстройствах пищевого поведения, резкой потере веса советуй обратиться к врачу.',
+    'Никогда не советуй питание ниже 1200 ккал в день, голодание или опасные практики. Не стыди пользователя — поддерживай.',
+    'Предлагай реальные, доступные в России продукты и блюда, с примерным весом порций и КБЖУ.',
+    `Данные пользователя: ${ctxText}`,
+  ].join('\n');
+  try {
+    const answer = await runText(env, [{ role: 'system', content: sys }, ...history], 700);
+    return json({ ok: true, answer: answer.trim() });
+  } catch (e) {
+    console.log('chat failed', e && e.stack);
+    return json({ ok: false, error: 'ИИ временно недоступен, попробуйте позже' }, 502);
+  }
+}
+
+// ---------- Напоминания ----------
+// rs:<uid> — настройки пользователя; rm:HHMM (UTC) — кому и что отправить в эту минуту.
+const REMINDER_TEXT = {
+  diary: '📝 Не забудьте записать еду в дневник — это займёт минуту.',
+  water: '💧 Время выпить стакан воды!',
+  weight: '⚖️ Сегодня день взвешивания. Запишите вес — утром натощак честнее всего.',
+  stats: '📊 Загляните в статистику дня: сколько осталось до нормы?',
+  plan: '🗓 Посмотрите план питания на завтра.',
+};
+const toUtc = (hhmm, tz) => {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  if (!(h >= 0 && h < 24 && m >= 0 && m < 60)) return null;
+  const t = (((h * 60 + m + tz) % 1440) + 1440) % 1440; // tz — смещение в минутах (как getTimezoneOffset)
+  return String(Math.floor(t / 60)).padStart(2, '0') + String(t % 60).padStart(2, '0');
+};
+function scheduleOf(rs) {
+  const out = {};
+  if (!rs || !rs.items) return out;
+  const add = (hhmm, type) => { const k = toUtc(hhmm, rs.tz || 0); if (k) (out[k] = out[k] || []).push(type); };
+  for (const [type, it] of Object.entries(rs.items)) {
+    if (!it || !it.on || !REMINDER_TEXT[type]) continue;
+    if (type === 'water') (it.ts || []).slice(0, 6).forEach((t) => add(t, 'water'));
+    else add(it.t, type);
+  }
+  return out;
+}
+async function apiReminders(req, env) {
+  const { error, body, user } = await userFromBody(req, env, 20000);
+  if (error) return error;
+  const uid = String(user.id);
+  const old = await env.DB.get(`rs:${uid}`, 'json');
+  if (!body.settings) return json({ ok: true, settings: old });
+  const s = body.settings;
+  const rs = { tz: Math.max(-840, Math.min(840, Number(s.tz) || 0)), items: {} };
+  for (const type of Object.keys(REMINDER_TEXT)) {
+    const it = (s.items || {})[type] || {};
+    rs.items[type] = { on: !!it.on, t: String(it.t || '20:00').slice(0, 5), ts: Array.isArray(it.ts) ? it.ts.map((x) => String(x).slice(0, 5)).slice(0, 6) : undefined, dow: Number(it.dow) || 1 };
+  }
+  const before = scheduleOf(old), after = scheduleOf(rs);
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const k of keys) {
+    const a = JSON.stringify(before[k] || []), b = JSON.stringify(after[k] || []);
+    if (a === b) continue;
+    const slot = (await env.DB.get(`rm:${k}`, 'json')) || {};
+    if (after[k]) slot[uid] = after[k]; else delete slot[uid];
+    if (Object.keys(slot).length) await env.DB.put(`rm:${k}`, JSON.stringify(slot)); else await env.DB.delete(`rm:${k}`);
+  }
+  await env.DB.put(`rs:${uid}`, JSON.stringify(rs));
+  return json({ ok: true });
+}
+/** Отправляет напоминания текущей минуты. Возвращает число использованных запросов. */
+async function processReminders(env, budget) {
+  const now = new Date();
+  const key = String(now.getUTCHours()).padStart(2, '0') + String(now.getUTCMinutes()).padStart(2, '0');
+  const slot = await env.DB.get(`rm:${key}`, 'json');
+  if (!slot) return 0;
+  let used = 0;
+  for (const [uid, types] of Object.entries(slot)) {
+    for (const type of types) {
+      if (used >= budget) return used;
+      if (type === 'weight') {
+        const rs = await env.DB.get(`rs:${uid}`, 'json');
+        const local = new Date(now.getTime() - ((rs && rs.tz) || 0) * 60000);
+        if (rs && rs.items.weight && local.getUTCDay() !== (rs.items.weight.dow % 7)) continue;
+      }
+      const r = await send(env, uid, REMINDER_TEXT[type], { reply_markup: openAppKeyboard(env, '🥗 Открыть дневник'), disable_notification: false });
+      used++;
+      if (!r.ok && r.error_code === 403) console.log('reminder blocked', uid);
+    }
+  }
+  return used;
+}
+
+// ---------- Экспорт файла в чат ----------
+async function apiExport(req, env) {
+  const { error, body, user } = await userFromBody(req, env, 2_000_000);
+  if (error) return error;
+  const name = String(body.filename || 'export.csv').replace(/[^\wа-яА-ЯёЁ.\- ]/g, '_').slice(0, 60);
+  const content = String(body.content || '');
+  if (!content) return json({ ok: false, error: 'Пустой файл' }, 400);
+  const type = name.endsWith('.html') ? 'text/html' : 'text/csv';
+  const fd = new FormData();
+  fd.append('chat_id', String(user.id));
+  fd.append('caption', String(body.caption || '📎 Ваш экспорт из «Калорий»').slice(0, 900));
+  fd.append('document', new Blob([type === 'text/csv' ? '﻿' + content : content], { type }), name);
+  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, { method: 'POST', body: fd }).then((x) => x.json());
+  if (!r.ok) return json({ ok: false, error: r.error_code === 403 ? 'Сначала нажмите «Старт» в чате с ботом' : (r.description || 'Не удалось отправить') }, 502);
+  return json({ ok: true });
+}
+
+// ---------- Журнал ошибок клиента ----------
+async function apiLog(req) {
+  try {
+    const t = (await req.text()).slice(0, 2000);
+    console.log('client error', t);
+  } catch {}
+  return json({ ok: true });
 }

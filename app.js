@@ -35,6 +35,7 @@ function dayTitle(d) {
   const t = startOfDay(new Date());
   if (sameDay(d, t)) return 'Сегодня';
   if (sameDay(d, addDays(t, -1))) return 'Вчера';
+  if (sameDay(d, addDays(t, 1))) return 'Завтра';
   return dateText(d);
 }
 function haptic(type) {
@@ -50,6 +51,33 @@ function toast(text) {
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), 1800);
+}
+
+/** Защита от двойного нажатия: пока действие выполняется, повторные вызовы игнорируются. */
+function lock(fn) {
+  let busy = false;
+  return async (...args) => {
+    if (busy) return;
+    busy = true;
+    try { return await fn(...args); } finally { setTimeout(() => { busy = false; }, 350); }
+  };
+}
+const skeleton = (n = 3) => Array.from({ length: n }, () => '<div class="card skel"><i></i><i></i><i></i></div>').join('');
+const emptyState = (icon, title, text, action, btn, arg = '') =>
+  `<div class="empty"><div class="em">${icon}</div><b>${title}</b>${text}${action ? `<button class="btn" style="margin-top:16px" data-a="${action}" data-v="${arg}">${btn}</button>` : ''}</div>`;
+const errorLog = [];
+function logError(msg) {
+  const m = String(msg).slice(0, 400);
+  errorLog.push(`${new Date().toLocaleTimeString('ru-RU')} ${m}`);
+  if (errorLog.length > 30) errorLog.shift();
+  try { if (API_URL && navigator.sendBeacon) navigator.sendBeacon(API_URL + '/api/log', JSON.stringify({ v: typeof APP_VERSION !== 'undefined' ? APP_VERSION : '', m })); } catch {}
+}
+window.addEventListener('error', (e) => logError(`${e.message} @${(e.filename || '').split('/').pop()}:${e.lineno}`));
+window.addEventListener('unhandledrejection', (e) => logError('promise: ' + (e.reason && (e.reason.message || e.reason))));
+function avatarBtn() {
+  const u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+  const letter = (u && u.first_name ? u.first_name[0] : '🙂').toUpperCase();
+  return `<button class="avatar ${S.tab === 'profile' ? 'on' : ''}" data-a="tab" data-t="profile" aria-label="Профиль">${u && u.photo_url ? `<img src="${esc(u.photo_url)}" alt="">` : esc(letter)}</button>`;
 }
 
 // ---------- Хранилище ----------
@@ -110,7 +138,7 @@ const MEALS = [
   { id: 'd', t: 'Ужин', i: '🌙' },
   { id: 's', t: 'Перекусы', i: '🥕' },
 ];
-const DEFAULT_PROFILE = { sex: 'm', age: 30, height: 175, weight: 75, activity: 'light', goal: 'lose', custom: false, customKcal: 2000, water: 2000 };
+const DEFAULT_PROFILE = { sex: 'm', age: 30, height: 175, weight: 75, activity: 'light', goal: 'lose', custom: false, customKcal: 2000, water: 2000, glass: 250, theme: 'auto' };
 
 function goals(p) {
   const bmr = 10 * p.weight + 6.25 * p.height - 5 * p.age + (p.sex === 'm' ? 5 : -161);
@@ -142,6 +170,11 @@ const S = {
   daySet: new Set(), // дни, в которые есть записи
   ach: {}, // полученные достижения
   strip: new Map(), // калории по дням для ленты дат
+  dishes: [], // избранные блюда
+  plan: new Map(), // план питания по дням
+  shop: {}, // список покупок
+  chat: [], // ИИ-помощник
+  daysCache: null, // кэш для статистики
 };
 
 // Еда: { n: название, b: бренд, k/p/f/c: на 100 г, s: порция, g: граммы, m: приём пищи, bc: штрихкод }
@@ -166,6 +199,7 @@ async function saveDay() {
   else { S.daySet.add(key); await Store.set(key, JSON.stringify(S.data)); }
   S.strip.set(key, totalsOf(S.data.e).k);
   S.history = null;
+  S.daysCache = null;
   await checkAchievements();
 }
 async function saveProfile() { await Store.set('profile', JSON.stringify(S.profile)); }
@@ -211,9 +245,12 @@ const sheets = [];
 function openSheet(sheet) { sheets.push(sheet); renderSheet(); }
 function closeSheet() { sheets.pop(); renderSheet(); }
 function closeAllSheets() { sheets.length = 0; renderSheet(); }
+let mountedSheet = null;
 function renderSheet() {
   const host = $('#sheets');
   const top = sheets[sheets.length - 1];
+  if (mountedSheet && mountedSheet.unmount) { try { mountedSheet.unmount(); } catch {} }
+  mountedSheet = top || null;
   if (!top) {
     host.innerHTML = '';
     try { tg.BackButton.hide(); } catch {}
@@ -264,9 +301,10 @@ function renderDiary() {
       <div class="label">${label}</div><div class="nums">${n0(v)} / ${n0(goal)} г</div></div>`;
   };
 
-  const cupsTotal = Math.min(16, Math.max(4, Math.round(g.water / 250)));
-  const cupsOn = Math.round(S.data.w / 250);
-  const cups = Array.from({ length: cupsTotal }, (_, i) => `<button class="cup ${i < cupsOn ? 'on' : ''} ${i === cupsOn - 1 && S.popCup ? 'pop' : ''}" data-a="waterSet" data-n="${i + 1}" aria-label="${(i + 1) * 250} мл"></button>`).join('');
+  const glass = S.profile.glass || 250;
+  const cupsTotal = Math.min(16, Math.max(4, Math.round(g.water / glass)));
+  const cupsOn = Math.min(cupsTotal, Math.round(S.data.w / glass));
+  const cups = Array.from({ length: cupsTotal }, (_, i) => `<button class="cup ${i < cupsOn ? 'on' : ''} ${i === cupsOn - 1 && S.popCup ? 'pop' : ''}" data-a="waterSet" data-n="${i + 1}" aria-label="${(i + 1) * glass} мл"></button>`).join('');
 
   const meals = MEALS.map((m) => {
     const items = S.data.e.map((e, i) => ({ e, i })).filter((x) => x.e.m === m.id);
@@ -274,9 +312,10 @@ function renderDiary() {
     const prevItems = (S.prev.e || []).filter((e) => e.m === m.id);
     return `<div class="list meal">
         <div class="meal-h"><div class="badge">${m.i}</div><div class="name">${m.t}</div>
-          <div class="kcal">${items.length ? `${n0(sum)} <span>ккал</span>` : ''}</div></div>
+          <div class="kcal">${items.length ? `${n0(sum)} <span>ккал</span>` : ''}</div>
+          ${items.length ? `<button class="dots" data-a="mealMenu" data-m="${m.id}" aria-label="Действия">⋯</button>` : ''}</div>
         ${items.map(({ e, i }) => { const x = per(e, e.g); return `<button class="row" data-a="edit" data-i="${i}">
-          <div class="main"><div class="title">${esc(e.n)}</div><div class="sub">${n0(e.g)} г · Б ${n1(x.p)} · Ж ${n1(x.f)} · У ${n1(x.c)}</div></div>
+          <div class="main"><div class="title">${esc(e.n)}</div><div class="sub">${e.sv ? n1(e.sv) + ' порц.' : n0(e.g) + ' г'} · Б ${n1(x.p)} · Ж ${n1(x.f)} · У ${n1(x.c)}</div></div>
           <div class="val">${n0(x.k)}</div></button>`; }).join('')}
         ${CFG.copyMeal && !items.length && prevItems.length ? `<button class="row copy" data-a="copyMeal" data-m="${m.id}"><span class="plus soft">↺</span>Как вчера · ${prevItems.length} ${plural(prevItems.length, 'продукт', 'продукта', 'продуктов')}, ${n0(totalsOf(prevItems).k)} ккал</button>` : ''}
         <button class="row add" data-a="add" data-m="${m.id}"><span class="plus">+</span>Добавить</button>
@@ -300,9 +339,13 @@ function renderDiary() {
   return `<div class="top">
       <h1><span class="sub-title">${subtitle}</span>${dayTitle(S.day)}</h1>
       ${isToday ? `<button class="streak-chip ${st ? '' : 'off'}" data-a="streakInfo">🔥 ${st}</button>` : '<button class="pill-btn" data-a="today">Сегодня</button>'}
+      ${avatarBtn()}
     </div>
     <div class="strip" id="strip">${strip}</div>
     ${banner}
+    ${!S.profile.hintDone && isToday ? `<div class="card coach"><button class="x" data-a="hintClose" aria-label="Скрыть">✕</button>
+      <b>👋 Как пользоваться</b>
+      <p>1. Нажмите <span class="kbd">+</span> внизу или «Добавить» в приёме пищи.<br>2. Ищите продукт, сканируйте штрихкод, сфотографируйте тарелку или скажите голосом.<br>3. Листайте дни в ленте сверху, а графики смотрите в «Статистике».</p></div>` : ''}
     <div class="hero">
       <div class="summary">
         <div class="ring">
@@ -322,13 +365,20 @@ function renderDiary() {
       </div>
       <div class="macros">${macro('Белки', t.p, g.protein, 'var(--prot)')}${macro('Жиры', t.f, g.fat, 'var(--fat)')}${macro('Углев.', t.c, g.carbs, 'var(--carb)')}</div>
     </div>
+    <div class="quick-row">
+      <button data-a="aiPhoto"><span>📷</span>Фото</button>
+      <button data-a="aiVoice"><span>🎙</span>Голос</button>
+      <button data-a="scan"><span>▥</span>Штрихкод</button>
+      <button data-a="favs"><span>⭐</span>Избранное</button>
+    </div>
     <div class="card">
       <div class="water-head">
-        <div class="main"><b>💧 Вода</b><div class="sub">${n0(S.data.w)} из ${n0(g.water)} мл</div></div>
-        <button class="round-btn" data-a="waterMinus" ${S.data.w <= 0 ? 'disabled' : ''} aria-label="Минус стакан">−</button>
+        <div class="main"><b>💧 Вода</b><div class="sub">${n0(S.data.w)} из ${n0(g.water)} мл · <button class="inline-link" data-a="waterLog">история</button></div></div>
+        <button class="round-btn" data-a="waterMinus" ${S.data.w <= 0 ? 'disabled' : ''} aria-label="Отменить последнее">−</button>
         <button class="round-btn" data-a="waterPlus" aria-label="Плюс стакан">+</button>
       </div>
       <div class="cups">${cups}</div>
+      <div class="water-quick">${[100, 200, 300, 500].map((v) => `<button data-a="waterAdd" data-v="${v}">+${v}</button>`).join('')}<button data-a="glassSet" class="ghost">🥛 ${glass} мл</button></div>
     </div>
     ${isToday && CFG.tips ? `<div class="card tip"><div class="ic">💡</div><div><b>Совет дня</b><p>${esc(tipOfDay())}</p></div></div>` : ''}
     ${meals}`;
@@ -484,11 +534,26 @@ function renderProfile() {
       <div><b>${bestStreak()}</b><span>рекорд, дней</span></div>
       <div><b>${S.daySet.size}</b><span>дней в дневнике</span></div>
     </div>
-    ${CFG.achievements ? `<div class="section-h"><span>Достижения</span><span>${got} из ${ACH.length}</span></div>
-    <div class="card"><div class="badges">${ACH.map((a) => `<button class="badge-item ${S.ach[a.id] ? 'on' : ''}" data-a="badge" data-id="${a.id}"><div class="medal">${a.i}</div><span>${a.t}</span></button>`).join('')}</div></div>` : ''}
+    ${CFG.achievements ? achievementsHTML(got) : ''}
+    <div class="section-h"><span>Настройки</span></div>
+    <div class="list">
+      <button class="row" data-a="notif"><div class="fic">🔔</div><div class="main"><div class="title">Напоминания</div><div class="sub">Дневник, вода, вес, статистика, план</div></div><span class="chev">›</span></button>
+      <div class="field"><span class="fic">🎨</span><label>Тема</label><div class="seg mini">${[['auto', 'Авто'], ['light', 'Светлая'], ['dark', 'Тёмная']].map(([v, t]) => `<button data-a="setTheme" data-v="${v}" class="${(S.profile.theme || 'auto') === v ? 'on' : ''}">${t}</button>`).join('')}</div></div>
+      <div class="field"><span class="fic">🥛</span><label>Объём стакана</label><input data-p="glass" inputmode="numeric" value="${S.profile.glass || 250}"><span class="unit">мл</span></div>
+      <div class="field col"><label>🥦 Предпочтения и ограничения</label><textarea data-pref rows="2" placeholder="Например: не ем свинину, аллергия на орехи, люблю рыбу">${esc(S.profile.prefs || '')}</textarea></div>
+    </div>
     ${profileFormHTML(S.profile)}
     <div class="footnote">Записи хранятся в вашем облаке Telegram и видны только вам. База продуктов — встроенная (${BUILTIN.length}) и Open Food Facts (ODbL).</div>
     <div class="version" data-a="secret">${esc(CFG.title)} · версия ${APP_VERSION}${isAdmin() ? ' · <span data-a="openAdmin">🛠 панель</span>' : ''}</div>`;
+}
+function achievementsHTML(got) {
+  const next = ACH.filter((a) => !S.ach[a.id] && a.pr).map((a) => ({ a, p: a.pr() })).sort((x, y) => y.p[0] / y.p[1] - x.p[0] / x.p[1])[0];
+  const hist = Object.entries(S.ach).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id, ts]) => ({ a: ACH.find((x) => x.id === id), ts })).filter((x) => x.a);
+  return `<div class="section-h"><span>Достижения</span><span>${got} из ${ACH.length}</span></div>
+    ${next ? `<div class="card next-ach"><div class="medal-sm">${next.a.i}</div><div class="main"><b>Следующее: ${next.a.t}</b><small>${next.a.d}</small>
+      <div class="bar"><i style="width:${Math.min(100, (next.p[0] / next.p[1]) * 100)}%;background:var(--grad)"></i></div><small>${Math.min(next.p[0], next.p[1])} из ${next.p[1]}</small></div></div>` : ''}
+    <div class="card"><div class="badges">${ACH.map((a) => `<button class="badge-item ${S.ach[a.id] ? 'on' : ''}" data-a="badge" data-id="${a.id}"><div class="medal">${a.i}</div><span>${a.t}</span></button>`).join('')}</div></div>
+    ${hist.length ? `<div class="list">${hist.map(({ a, ts }) => `<div class="row"><div class="fic">${a.i}</div><div class="main"><div class="title">${a.t}</div><div class="sub">${a.d}</div></div><div class="val">${dateText(new Date(ts))}</div></div>`).join('')}</div>` : ''}`;
 }
 function onboardingSheet() {
   return {
@@ -503,8 +568,9 @@ function onboardingSheet() {
 }
 
 // ---------- Добавление еды ----------
-function addFoodSheet(meal) {
-  const st = { q: '', results: null, loading: false, error: null, searched: '', cat: null };
+// opts.pick(food, grams, meal) — режим выбора (для блюд, плана, замены); opts.query — начальный запрос.
+function addFoodSheet(meal, opts = {}) {
+  const st = { q: opts.query || '', results: null, loading: false, error: null, searched: '', cat: null };
   const norm = (t) => t.toLowerCase().replace(/ё/g, 'е');
   const featured = () => (CFG.foods || []).map((f) => ({ ...f, star: true }));
   const local = () => {
@@ -513,7 +579,8 @@ function addFoodSheet(meal) {
     if (!words.length) return [];
     const seen = new Set();
     const scored = [];
-    for (const f of [...featured(), ...S.custom, ...S.recent, ...BUILTIN]) {
+    const dishes = S.dishes.map(dishAsFood), recipes = RECIPES.map((r) => ({ ...recipeAsFood(r), emoji: r.e }));
+    for (const f of [...featured(), ...dishes, ...S.custom, ...S.recent, ...BUILTIN, ...recipes]) {
       const name = norm(f.n), hay = name + ' ' + norm(f.b || '');
       if (!words.every((w) => hay.includes(w)) || seen.has(foodKey(f))) continue;
       seen.add(foodKey(f));
@@ -535,9 +602,13 @@ function addFoodSheet(meal) {
     }
     if (!q) {
       const fe = featured();
-      return `<div class="quick">
-          <button data-a="barcode"><span>🔢</span>По штрихкоду<small>цифры с упаковки</small></button>
+      const last = S.recent[0];
+      return `<div class="quick ${opts.pick ? '' : 'q4'}">
+          ${opts.pick ? '' : '<button data-a="aiPhotoHere"><span>📷</span>Фото<small>ИИ распознает</small></button><button data-a="aiVoiceHere"><span>🎙</span>Голос / текст<small>«2 яйца и гречка»</small></button>'}
+          <button data-a="barcode"><span>▥</span>Штрихкод<small>камерой</small></button>
           <button data-a="manual"><span>✍️</span>Свой продукт<small>КБЖУ с этикетки</small></button></div>
+        ${!opts.pick && last ? `<div class="list"><button class="row" data-a="pickLast"><div class="fic">↺</div><div class="main"><div class="title">Повторить последнее</div><div class="sub">${esc(last.n)} · ${n0(last.lg || last.s || 100)} г</div></div><span class="pill-btn">+ ${n0(per(last, last.lg || last.s || 100).k)} ккал</span></button></div>` : ''}
+        ${S.dishes.length ? `<div class="section-h"><span>⭐ Мои блюда</span></div><div class="list">${S.dishes.map((d) => row(dishAsFood(d))).join('')}</div>` : ''}
         ${fe.length ? `<div class="section-h"><span>⭐ Рекомендуем</span></div><div class="list">${fe.map(row).join('')}</div>` : ''}
         ${S.recent.length ? `<div class="section-h"><span>Недавние</span></div><div class="list">${S.recent.slice(0, 12).map(row).join('')}</div>` : ''}
         ${S.custom.length ? `<div class="section-h"><span>Мои продукты</span></div><div class="list">${S.custom.map(row).join('')}</div>` : ''}
@@ -550,7 +621,7 @@ function addFoodSheet(meal) {
     else if (st.error) online = `<div class="row"><div class="main" style="color:var(--hint)">${esc(st.error)}</div></div><button class="row add" data-a="search">Повторить</button>`;
     else if (st.results && st.searched === q) online = st.results.length ? st.results.map(row).join('') : `<div class="row"><div class="main" style="color:var(--hint)">Ничего не нашлось</div></div>`;
     else online = `<button class="row add" data-a="search"><span class="plus">🔍</span>Искать «${esc(q)}» в интернете</button>`;
-    return `${loc.length ? `<div class="section-h"><span>Найдено</span><span>${loc.length}</span></div><div class="list">${loc.map(row).join('')}</div>` : ''}
+    return `${loc.length ? `<div class="section-h"><span>Найдено</span><span>${loc.length}</span></div><div class="list">${loc.map(row).join('')}</div>` : `<div class="empty small"><div class="em">🔎</div>В базе нет «${esc(q)}»</div>`}
       ${CFG.online ? `<div class="section-h"><span>🌐 Интернет-база</span></div><div class="list">${online}</div>` : ''}
       <div class="list"><button class="row add" data-a="manual"><span class="plus">✍️</span>Создать «${esc(q)}» вручную</button></div>`;
   };
@@ -560,13 +631,13 @@ function addFoodSheet(meal) {
     if (q.length < 2 || st.loading) return;
     st.loading = true; st.error = null; update();
     try { st.results = await offSearch(q); st.searched = q; }
-    catch { st.error = 'Не удалось загрузить. Проверьте интернет.'; }
+    catch { st.error = 'Не удалось загрузить. Проверьте интернет.'; logError('off search failed'); }
     st.loading = false; update();
   }
   return {
-    title: MEALS.find((m) => m.id === meal).t,
+    title: opts.pick ? 'Выберите продукт' : MEALS.find((m) => m.id === meal).t,
     render: () => `<div class="search-wrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-      <input class="search" id="foodSearch" type="search" enterkeyhint="search" placeholder="Продукт или бренд" value="${esc(st.q)}" autocomplete="off"></div>
+      <input class="search" id="foodSearch" type="search" enterkeyhint="search" placeholder="Продукт, блюдо или бренд" value="${esc(st.q)}" autocomplete="off"></div>
       <div id="foodResults">${results()}</div>`,
     mount(el) {
       const input = el.querySelector('#foodSearch');
@@ -574,30 +645,38 @@ function addFoodSheet(meal) {
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { input.blur(); search(); } });
     },
     actions: {
-      pick(d) { openSheet(amountSheet(pool[+d.i], meal)); },
+      pick(d) { openSheet(amountSheet(pool[+d.i], meal, opts)); },
+      pickLast() { openSheet(amountSheet(S.recent[0], meal, opts)); },
       search,
-      barcode() { openSheet(barcodeSheet(meal)); },
+      barcode() { openSheet(scannerSheet(meal, opts)); },
+      aiPhotoHere() { openSheet(photoSheet(meal)); },
+      aiVoiceHere() { openSheet(voiceSheet(meal)); },
       cat(d) { st.cat = +d.c; update(); document.querySelector('#sheets .sheet').scrollTo(0, 0); },
       catBack() { st.cat = null; update(); },
-      manual() { openSheet(manualSheet(meal, { n: st.q.trim() })); },
+      manual() { openSheet(manualSheet(meal, { n: st.q.trim() }, opts)); },
     },
   };
 }
 
-function amountSheet(food, meal) {
+function amountSheet(food, meal, opts = {}) {
+  const portion = food.rid || food.did; // рецепт или своё блюдо — считаем в порциях
   const st = { g: food.lg || food.s || 100, meal };
-  const presets = [...new Set([food.s, 50, 100, 150, 200, 300].filter(Boolean))];
+  const presets = portion
+    ? [0.5, 1, 1.5, 2].map((k) => Math.round((food.s || 100) * k))
+    : [...new Set([food.s, 50, 100, 150, 200, 300].filter(Boolean))];
+  const label = (v) => (portion ? `${n1(v / (food.s || 100))} порц.` : `${v === food.s ? 'Порция ' : ''}${n0(v)} г`);
   const totals = () => totalsHTML(per(food, st.g));
   return {
-    title: 'Количество',
-    render: () => `<div class="card food-card"><div class="ic">🍽️</div><div><b>${esc(food.n)}</b><small>${esc(foodSub(food))}</small></div></div>
+    title: opts.pick ? 'Количество' : 'Добавить в дневник',
+    render: () => `<div class="card food-card"><div class="ic">${food.emoji || (food.star ? '⭐' : catEmoji(food))}</div><div><b>${esc(food.n)}</b><small>${esc(foodSub(food))}</small></div></div>
       <div class="list">
         <div class="field"><label>Вес</label><input id="grams" inputmode="decimal" value="${n1(st.g)}"><span class="unit">г</span></div>
-        <div class="chips" style="padding-top:8px">${presets.map((v) => `<button class="chip ${v === st.g ? 'on' : ''}" data-a="preset" data-v="${v}">${v === food.s ? 'Порция ' : ''}${n0(v)} г</button>`).join('')}</div>
+        <div class="chips" style="padding-top:8px">${presets.map((v) => `<button class="chip ${v === st.g ? 'on' : ''}" data-a="preset" data-v="${v}">${label(v)}</button>`).join('')}</div>
         <div class="field">${mealSeg(st.meal)}</div>
       </div>
       <div class="card" id="amountTotals">${totals()}</div>
-      <button class="btn" data-a="addEntry">Добавить в дневник</button>`,
+      ${portion ? '<p class="hint" style="text-align:center;margin-top:-6px">Порция рассчитана по ингредиентам блюда — значения приблизительные.</p>' : ''}
+      <button class="btn" data-a="addEntry">${opts.pick ? 'Выбрать' : 'Добавить в дневник'}</button>`,
     mount(el) {
       const input = el.querySelector('#grams');
       input.addEventListener('input', () => {
@@ -609,87 +688,109 @@ function amountSheet(food, meal) {
     actions: {
       preset(d) { st.g = +d.v; refreshSheet(); },
       meal(d) { st.meal = d.m; refreshSheet(); },
-      async addEntry() {
-        if (st.g <= 0) return toast('Укажите вес');
-        S.data.e.push({ ...plainFood(food), g: st.g, m: st.meal, t: Date.now() });
+      addEntry: lock(async () => {
+        if (!(st.g > 0) || st.g > 5000) return toast('Укажите вес от 1 до 5000 г');
+        if (opts.pick) return opts.pick(food, st.g, st.meal);
+        S.data.e.push({ ...plainFood(food), g: st.g, m: st.meal, t: Date.now(), sv: portion ? Math.round((st.g / (food.s || 100)) * 10) / 10 : undefined });
+        S.profile.added = (S.profile.added || 0) + 1;
         haptic('success');
         closeAllSheets();
         render();
         toast('Добавлено');
         await saveDay();
-        await remember(food, st.g);
-      },
+        if (!portion) await remember(food, st.g);
+        saveProfile();
+      }),
     },
   };
 }
 
 function editSheet(index) {
   const e = S.data.e[index];
+  const time = e.t ? new Date(e.t) : new Date(S.day.getTime() + 12 * 3600e3);
+  const hhmm = `${pad(time.getHours())}:${pad(time.getMinutes())}`;
   return {
     title: 'Запись',
-    render: () => `<div class="card food-card"><div class="ic">🍽️</div><div><b>${esc(e.n)}</b>${e.b ? `<small>${esc(e.b)}</small>` : ''}</div></div>
+    render: () => `<div class="card food-card"><div class="ic">${catEmoji(e)}</div><div><b>${esc(e.n)}</b>${e.b ? `<small>${esc(e.b)}</small>` : ''}</div></div>
       <div class="list">
         <div class="field"><label>Вес</label><input id="grams" inputmode="decimal" value="${n1(e.g)}"><span class="unit">г</span></div>
+        <div class="field"><label>Время</label><input id="etime" type="time" value="${hhmm}"></div>
         <div class="field">${mealSeg(e.m)}</div>
       </div>
       <div class="card" id="editTotals">${totalsHTML(per(e, e.g))}</div>
       <button class="btn" data-a="done">Готово</button>
+      <div class="quick">
+        <button data-a="dup"><span>⧉</span>Повторить<small>ещё одна порция</small></button>
+        <button data-a="toFav"><span>⭐</span>В избранное<small>как блюдо</small></button>
+      </div>
       <button class="btn danger" data-a="del">Удалить запись</button>`,
     mount(el) {
       const input = el.querySelector('#grams');
-      input.addEventListener('input', () => { e.g = num(input.value); el.querySelector('#editTotals').innerHTML = totalsHTML(per(e, e.g)); });
+      input.addEventListener('input', () => { e.g = Math.max(0, Math.min(5000, num(input.value))); if (e.sv) delete e.sv; el.querySelector('#editTotals').innerHTML = totalsHTML(per(e, e.g)); });
+      el.querySelector('#etime').addEventListener('change', (ev) => {
+        const [h, m] = ev.target.value.split(':').map(Number);
+        if (h >= 0) e.t = new Date(S.day.getFullYear(), S.day.getMonth(), S.day.getDate(), h, m).getTime();
+      });
     },
     actions: {
       meal(d) { e.m = d.m; refreshSheet(); },
-      async done() { closeAllSheets(); render(); await saveDay(); },
-      async del() { S.data.e.splice(index, 1); haptic(); closeAllSheets(); render(); await saveDay(); },
+      done: lock(async () => { if (!(e.g > 0)) return toast('Укажите вес'); closeAllSheets(); render(); await saveDay(); }),
+      dup: lock(async () => { S.data.e.push({ ...e, t: Date.now() }); haptic('success'); closeAllSheets(); render(); toast('Добавлена ещё порция'); await saveDay(); }),
+      async toFav() {
+        await saveDish({ id: Date.now().toString(36), n: e.n, sv: 1, ing: [{ ...plainFood(e), g: e.g }] });
+        haptic('success'); toast('⭐ Сохранено в избранное');
+      },
+      del: lock(async () => { S.data.e.splice(index, 1); haptic(); closeAllSheets(); render(); await saveDay(); }),
     },
   };
 }
 
-function barcodeSheet(meal) {
-  const st = { code: '', loading: false, notFound: false };
+function barcodeSheet(meal, initCode = '', opts = {}) {
+  const st = { code: initCode, loading: false, notFound: false, product: null };
+  const find = async () => {
+    if (st.code.length < 6) return toast('Слишком короткий код');
+    const local = [...S.custom, ...S.recent].find((f) => f.bc === st.code);
+    if (local) { sheets.pop(); return openSheet(amountSheet(local, meal, opts)); }
+    st.loading = true; st.notFound = false; refreshSheet();
+    try {
+      const food = await offProduct(st.code);
+      st.loading = false;
+      if (food) { sheets.pop(); openSheet(amountSheet(food, meal, opts)); }
+      else { st.notFound = true; refreshSheet(); }
+    } catch { st.loading = false; refreshSheet(); toast('Нет соединения с базой продуктов'); logError('off product failed'); }
+  };
   return {
     title: 'Штрихкод',
-    render: () => `<div class="list"><div class="field"><input id="code" class="wide" style="width:100%" inputmode="numeric" placeholder="Цифры под штрихкодом" value="${esc(st.code)}"></div></div>
-      ${st.notFound ? `<div class="card">Штрихкода <b>${esc(st.code)}</b> пока нет в базе. Добавьте продукт сами — в следующий раз он найдётся по этому коду.</div>
-        <button class="btn" data-a="manualWithCode">Добавить вручную</button>` : ''}
+    render: () => `<div class="list"><div class="field"><span class="fic">▥</span><input id="code" class="wide" inputmode="numeric" placeholder="Цифры под штрихкодом" value="${esc(st.code)}"></div></div>
+      ${st.loading ? '<div class="card" style="display:flex;gap:12px;align-items:center"><div class="spinner"></div>Ищем продукт в базе…</div>' : ''}
+      ${st.notFound ? `<div class="card">😕 Штрихкода <b>${esc(st.code)}</b> пока нет в базе. Создайте карточку продукта — в следующий раз он найдётся по этому коду.</div>
+        <button class="btn" data-a="manualWithCode">Создать карточку продукта</button>` : ''}
       <button class="btn ${st.notFound ? 'ghost' : ''}" data-a="find" ${st.loading ? 'disabled' : ''}>${st.loading ? 'Ищем…' : 'Найти'}</button>
-      <div class="footnote" style="margin-top:0">Введите 8 или 13 цифр, напечатанных под полосками штрихкода.</div>`,
+      <div class="footnote" style="margin-top:0">EAN-13, EAN-8 и другие — 8–13 цифр под полосками.</div>`,
     mount(el) {
       const input = el.querySelector('#code');
       input.addEventListener('input', () => { st.code = input.value.replace(/\D/g, ''); });
-      input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') sheets[sheets.length - 1].actions.find(); });
-      if (!st.code) setTimeout(() => input.focus(), 250);
+      input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') find(); });
+      if (initCode && !st.loading && !st.notFound && !st.tried) { st.tried = true; find(); }
+      else if (!st.code) setTimeout(() => input.focus(), 250);
     },
     actions: {
-      async find() {
-        if (st.code.length < 6) return toast('Слишком короткий код');
-        const local = [...S.custom, ...S.recent].find((f) => f.bc === st.code);
-        if (local) return openSheet(amountSheet(local, meal));
-        st.loading = true; st.notFound = false; refreshSheet();
-        try {
-          const food = await offProduct(st.code);
-          st.loading = false;
-          if (food) { refreshSheet(); openSheet(amountSheet(food, meal)); }
-          else { st.notFound = true; refreshSheet(); }
-        } catch { st.loading = false; refreshSheet(); toast('Нет соединения с базой продуктов'); }
-      },
-      manualWithCode() { openSheet(manualSheet(meal, { bc: st.code })); },
+      find,
+      manualWithCode() { sheets.pop(); openSheet(manualSheet(meal, { bc: st.code }, opts)); },
     },
   };
 }
 
-function manualSheet(meal, init) {
+function manualSheet(meal, init, opts = {}) {
   const st = { n: init.n || '', b: '', bc: init.bc || '', k: '', p: '', f: '', c: '', s: '' };
   const fields = [['k', 'Калории', 'ккал'], ['p', 'Белки', 'г'], ['f', 'Жиры', 'г'], ['c', 'Углеводы', 'г']];
   const calc = () => num(st.p) * 4 + num(st.f) * 9 + num(st.c) * 4;
   return {
     title: 'Свой продукт',
     render: () => `<div class="list">
-        <div class="field"><input class="wide" style="width:100%" data-f="n" placeholder="Название" value="${esc(st.n)}"></div>
-        <div class="field"><input class="wide" style="width:100%" data-f="b" placeholder="Бренд (необязательно)" value="${esc(st.b)}"></div>
-        <div class="field"><input class="wide" style="width:100%" data-f="bc" inputmode="numeric" placeholder="Штрихкод (необязательно)" value="${esc(st.bc)}"></div>
+        <div class="field"><input class="wide" data-f="n" placeholder="Название" value="${esc(st.n)}" maxlength="80"></div>
+        <div class="field"><input class="wide" data-f="b" placeholder="Производитель (необязательно)" value="${esc(st.b)}" maxlength="60"></div>
+        <div class="field"><input class="wide" data-f="bc" inputmode="numeric" placeholder="Штрихкод (необязательно)" value="${esc(st.bc)}"></div>
       </div>
       <div class="section-h"><span>На 100 г</span></div>
       <div class="list">${fields.map(([k, t, u]) => `<div class="field"><label>${t}</label><input data-f="${k}" inputmode="decimal" placeholder="0" value="${esc(st[k])}"><span class="unit">${u}</span></div>`).join('')}</div>
@@ -704,18 +805,20 @@ function manualSheet(meal, init) {
       }));
     },
     actions: {
-      async save() {
+      save: lock(async () => {
         const name = st.n.trim();
         const k = st.k ? num(st.k) : calc();
+        const vals = [num(st.p), num(st.f), num(st.c)];
         if (!name) return toast('Введите название');
-        if (k <= 0) return toast('Укажите калории или БЖУ');
-        const food = { n: name, b: st.b.trim() || undefined, bc: st.bc.trim() || undefined, k, p: num(st.p), f: num(st.f), c: num(st.c), s: num(st.s) || undefined };
+        if (k <= 0 || k > 950) return toast('Калорийность на 100 г — от 1 до 950 ккал');
+        if (vals.some((v) => v < 0 || v > 100) || vals.reduce((a, b) => a + b, 0) > 101) return toast('БЖУ на 100 г не могут быть больше 100 г в сумме');
+        const food = { n: name, b: st.b.trim() || undefined, bc: st.bc.trim() || undefined, k, p: vals[0], f: vals[1], c: vals[2], s: num(st.s) || undefined };
         S.custom = fitList([food, ...S.custom.filter((x) => foodKey(x) !== foodKey(food))]);
         await Store.set('custom', JSON.stringify(S.custom));
         checkAchievements();
         sheets.pop();
-        openSheet(amountSheet(food, meal));
-      },
+        openSheet(amountSheet(food, meal, opts));
+      }),
     },
   };
 }
@@ -779,10 +882,13 @@ function bestStreak() {
 }
 
 const ACH = [
-  { id: 'first', i: '🍽️', t: 'Первый шаг', d: 'Добавить первую запись', ok: () => S.data.e.length > 0 },
-  { id: 's3', i: '🔥', t: 'Разгон', d: '3 дня подряд', ok: () => streak() >= 3 },
-  { id: 's7', i: '⚡', t: 'Неделя', d: '7 дней подряд', ok: () => streak() >= 7 },
-  { id: 's30', i: '👑', t: 'Легенда', d: '30 дней подряд', ok: () => streak() >= 30 },
+  { id: 'first', i: '🍽️', t: 'Первый шаг', d: 'Первый день ведения дневника', ok: () => S.data.e.length > 0 || S.daySet.size > 0, pr: () => [Math.min(1, S.daySet.size), 1] },
+  { id: 's3', i: '🔥', t: 'Разгон', d: '3 дня подряд', ok: () => streak() >= 3, pr: () => [streak(), 3] },
+  { id: 's7', i: '⚡', t: 'Неделя', d: '7 дней подряд', ok: () => streak() >= 7, pr: () => [streak(), 7] },
+  { id: 's30', i: '👑', t: 'Легенда', d: '30 дней подряд', ok: () => streak() >= 30, pr: () => [streak(), 30] },
+  { id: 'p100', i: '💯', t: 'Сотня', d: 'Добавить 100 продуктов', ok: () => (S.profile.added || 0) >= 100, pr: () => [S.profile.added || 0, 100] },
+  { id: 'week', i: '📅', t: 'Полная неделя', d: 'Заполнить дневник 7 дней за неделю', ok: () => Array.from({ length: 7 }, (_, i) => dayKey(addDays(startOfDay(new Date()), -i))).every((k) => S.daySet.has(k)), pr: () => [Array.from({ length: 7 }, (_, i) => dayKey(addDays(startOfDay(new Date()), -i))).filter((k) => S.daySet.has(k)).length, 7] },
+  { id: 'fav', i: '⭐', t: 'Своё меню', d: 'Сохранить блюдо в избранное', ok: () => S.dishes.length > 0, pr: () => [Math.min(1, S.dishes.length), 1] },
   { id: 'water', i: '💧', t: 'Водный баланс', d: 'Выпить норму воды за день', ok: () => S.data.w >= goals(S.profile).water },
   { id: 'target', i: '🎯', t: 'В точку', d: 'Съесть 90–110% нормы калорий', ok: () => { const r = totalsOf(S.data.e).k / goals(S.profile).kcal; return r >= 0.9 && r <= 1.1; } },
   { id: 'protein', i: '💪', t: 'Белковый день', d: 'Выполнить норму белка', ok: () => totalsOf(S.data.e).p >= goals(S.profile).protein },
@@ -790,7 +896,7 @@ const ACH = [
   { id: 'scale', i: '⚖️', t: 'На весах', d: 'Записать свой вес', ok: () => S.weights.length > 0 },
   { id: 'chef', i: '👨‍🍳', t: 'Шеф', d: 'Создать свой продукт', ok: () => S.custom.length > 0 },
   { id: 'gourmet', i: '🍱', t: 'Гурман', d: 'Попробовать 10 разных продуктов', ok: () => S.recent.length >= 10 },
-  { id: 'loyal', i: '💎', t: 'Постоянство', d: 'Вести дневник 14 дней', ok: () => S.daySet.size >= 14 },
+  { id: 'loyal', i: '💎', t: 'Постоянство', d: 'Вести дневник 14 дней', ok: () => S.daySet.size >= 14, pr: () => [S.daySet.size, 14] },
 ];
 async function checkAchievements() {
   if (!CFG.achievements) return;
@@ -873,7 +979,7 @@ function showWelcome() {
 }
 
 // ---------- Глобальные настройки (меняются владельцем в скрытой панели) ----------
-const APP_VERSION = '3.1';
+const APP_VERSION = '4.0';
 const DEFAULT_CONFIG = {
   title: 'Калории',
   theme: 'ice',
@@ -887,6 +993,7 @@ const DEFAULT_CONFIG = {
   banner: { on: false, text: '', style: 'info' },
   maintenance: { on: false, text: 'Скоро вернёмся — идут технические работы 🛠' },
   foods: [],
+  botLink: '',
 };
 const THEMES = [
   { id: 'ice', t: 'Лёд', c: 'linear-gradient(135deg,#2563ff,#1fc3ee)' },
@@ -1065,6 +1172,7 @@ function adminSheet() {
       <div class="card"><div class="themes">${THEMES.map((t) => `<button class="theme-dot ${draft.theme === t.id ? 'on' : ''}" data-a="cfgSet" data-k="theme" data-v="${t.id}"><i style="background:${t.c}"></i>${t.t}</button>`).join('')}</div></div>
       <div class="list">
         <div class="field"><label>Название</label><input class="wide" style="text-align:right" data-cfg="title" value="${esc(draft.title)}" maxlength="24"></div>
+        <div class="field"><label>Ссылка на бота</label><input class="wide" style="text-align:right" data-cfg="botLink" value="${esc(draft.botLink || '')}" placeholder="https://t.me/имя_бота" maxlength="80"></div>
         <div class="field"><textarea data-cfg="welcomeText" rows="2" placeholder="Своя фраза на экране приветствия (необязательно)">${esc(draft.welcomeText)}</textarea></div>
       </div>
 
@@ -1199,11 +1307,20 @@ const TAB_ICONS = {
   history: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
   weight: '<rect x="3" y="4" width="18" height="16" rx="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8.5 10a4 4 0 0 1 7 0l-2 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
   profile: '<circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  stats: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  menu: '<path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3V4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 9h6M9 13h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  ai: '<path d="M12 3l1.8 4.6L18.5 9l-4.7 1.6L12 15l-1.8-4.4L5.5 9l4.7-1.4L12 3Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9L18 15Z" fill="currentColor"/>',
 };
-const TABS = [['diary', 'Дневник'], ['history', 'История'], ['weight', 'Вес'], ['profile', 'Профиль']];
+const TABS = [['diary', 'Дневник'], ['stats', 'Статистика'], ['menu', 'Питание'], ['ai', 'ИИ']];
+let lastTab = null;
 function render() {
-  const views = { diary: renderDiary, history: renderHistory, weight: renderWeight, profile: renderProfile };
-  $('#app').innerHTML = views[S.tab]();
+  const views = { diary: renderDiary, stats: renderStats, menu: renderMenu, ai: renderAI, profile: renderProfile, history: renderHistory, weight: renderWeight };
+  const app = $('#app');
+  app.innerHTML = (views[S.tab] || renderDiary)();
+  if (lastTab !== S.tab) { app.classList.remove('tab-in'); void app.offsetWidth; app.classList.add('tab-in'); lastTab = S.tab; }
+  if (S.tab === 'ai') mountAI();
+  const pf = document.querySelector('[data-pref]');
+  if (pf) pf.addEventListener('change', async () => { S.profile.prefs = pf.value.slice(0, 300); await saveProfile(); toast('Сохранено'); });
   const tab = ([id, t]) => `<button class="tab ${S.tab === id ? 'on' : ''}" data-a="tab" data-t="${id}"><svg viewBox="0 0 24 24">${TAB_ICONS[id]}</svg>${t}</button>`;
   $('#tabs').innerHTML = TABS.slice(0, 2).map(tab).join('') + '<button class="fab" data-a="quickAdd" aria-label="Добавить еду">+</button>' + TABS.slice(2).map(tab).join('');
   if (S.tab === 'diary') {
@@ -1217,8 +1334,10 @@ function render() {
 async function setWater(ml) {
   const goal = goals(S.profile).water;
   const reached = S.data.w < goal && ml >= goal;
+  const delta = Math.round(ml - S.data.w);
   S.popCup = ml > S.data.w;
-  S.data.w = ml;
+  S.data.w = Math.max(0, Math.min(10000, ml));
+  if (delta) { S.data.wl = [...(S.data.wl || []), [Date.now(), delta]].slice(-40); }
   haptic(reached ? 'success' : undefined);
   render();
   if (reached) { celebrate(); toast('💧 Норма воды выполнена!'); }
@@ -1234,9 +1353,21 @@ const actions = {
   async openDay(d) { await loadDay(parseIso(d.d)); S.tab = 'diary'; render(); window.scrollTo(0, 0); },
   add(d) { openSheet(addFoodSheet(d.m)); },
   edit(d) { openSheet(editSheet(+d.i)); },
-  async waterPlus() { await setWater(S.data.w + 250); },
-  async waterSet(d) { const n = +d.n; const cur = Math.round(S.data.w / 250); await setWater((cur === n ? n - 1 : n) * 250); },
-  async waterMinus() { await setWater(Math.max(0, S.data.w - 250)); },
+  async waterPlus() { await setWater(S.data.w + (S.profile.glass || 250)); },
+  async waterAdd(d) { await setWater(S.data.w + +d.v); toast(`💧 +${d.v} мл`); },
+  waterSet: lock(async (d) => { const gl = S.profile.glass || 250; const n = +d.n; const cur = Math.round(S.data.w / gl); await setWater((cur === n ? n - 1 : n) * gl); }),
+  waterMinus: lock(async () => {
+    const last = (S.data.wl || []).filter((x) => x[1] > 0).pop();
+    await setWater(Math.max(0, S.data.w - (last ? last[1] : S.profile.glass || 250)));
+  }),
+  waterLog() { openSheet(waterLogSheet()); },
+  glassSet() { openSheet(glassSheet()); },
+  scan() { openSheet(scannerSheet(suggestedMeal())); },
+  favs() { S.tab = 'menu'; S.menuTab = 'fav'; render(); window.scrollTo(0, 0); },
+  mealMenu(d) { openSheet(mealMenuSheet(d.m)); },
+  async hintClose() { S.profile.hintDone = true; render(); await saveProfile(); },
+  notif() { openSheet(notifSheet()); },
+  async setTheme(d) { S.profile.theme = d.v; applyTheme(); render(); await saveProfile(); },
   async pickDay(d) { haptic(); await loadDay(parseIso(d.d)); render(); },
   secret() { secretTap(); },
   openAdmin(d, el) { secretTaps = 0; openSheet(adminSheet()); },
@@ -1303,7 +1434,7 @@ document.addEventListener('change', async (ev) => {
   const el = ev.target;
   if (!el.dataset || !el.dataset.p) return;
   const k = el.dataset.p;
-  const limits = { age: [10, 100], height: [100, 250], weight: [25, 400], customKcal: [800, 6000], water: [250, 6000] };
+  const limits = { age: [10, 100], height: [100, 250], weight: [25, 400], customKcal: [800, 6000], water: [250, 6000], glass: [50, 1000] };
   const [lo, hi] = limits[k];
   let v = num(el.value);
   if (!v) v = DEFAULT_PROFILE[k];
@@ -1324,13 +1455,18 @@ async function init() {
     try { tg.BackButton.onClick(() => { if (sheets.length) closeSheet(); }); } catch {}
   }
   $('#app').innerHTML = '<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>';
-  const [v, keys] = await Promise.all([Store.get(['profile', 'recent', 'custom', 'weights', 'ach']), Store.keys()]);
+  const [v, keys] = await Promise.all([Store.get(['profile', 'recent', 'custom', 'weights', 'ach', 'shop', 'chat']), Store.keys()]);
   S.daySet = new Set(keys.filter((k) => /^d_\d{8}$/.test(k)));
   S.ach = parse(v.ach, {});
+  S.shop = parse(v.shop, {});
+  S.chat = parse(v.chat, []);
+  const dishKeys = keys.filter((k) => k.startsWith('ds_'));
+  if (dishKeys.length) { const dv = await Store.get(dishKeys); S.dishes = dishKeys.map((k) => parse(dv[k], null)).filter(Boolean).sort((a, b) => (b.id > a.id ? 1 : -1)); }
   S.profile = { ...DEFAULT_PROFILE, ...parse(v.profile, {}) };
   S.recent = parse(v.recent, []);
   S.custom = parse(v.custom, []);
   S.weights = parse(v.weights, []);
+  applyTheme();
   const stripKeys = Array.from({ length: 21 }, (_, i) => dayKey(addDays(startOfDay(new Date()), -i))).filter((k) => S.daySet.has(k));
   const stripVals = await Store.get(stripKeys);
   for (const k of stripKeys) S.strip.set(k, totalsOf(parse(stripVals[k], { e: [] }).e || []).k);
@@ -1352,10 +1488,11 @@ function showMaintenance() {
 }
 
 function applyTheme() {
-  const dark = tg && tg.colorScheme ? tg.colorScheme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const pref = S.profile && S.profile.theme;
+  const dark = pref === 'dark' ? true : pref === 'light' ? false : tg && tg.colorScheme ? tg.colorScheme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
   const bg = dark ? '#0a1322' : '#edf4ff';
   try { tg.setHeaderColor(bg); tg.setBackgroundColor(bg); } catch {}
   try { if (tg.isVersionAtLeast('7.10')) tg.setBottomBarColor(bg); } catch {}
 }
-init();
+document.addEventListener('DOMContentLoaded', () => init().catch((e) => { logError('init: ' + (e && e.stack)); $('#app').innerHTML = emptyState('⚠️', 'Не удалось загрузить', 'Закройте и откройте приложение ещё раз.'); }));
