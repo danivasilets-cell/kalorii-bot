@@ -1090,7 +1090,7 @@ function showWelcome() {
 }
 
 // ---------- Глобальные настройки (меняются владельцем в скрытой панели) ----------
-const APP_VERSION = '5.3';
+const APP_VERSION = '5.4';
 const DEFAULT_CONFIG = {
   title: 'Калории',
   theme: 'ice',
@@ -1326,7 +1326,7 @@ function adminSheet() {
       </div>
 
       <div class="section-h"><span>🌐 Язык для всех</span></div>
-      <div class="card"><div class="seg" data-notr>${[['', 'Выбор пользователя'], ['uk', '🇺🇦 UK'], ['ru', '💩 RU'], ['en', '🇬🇧 EN']].map(([v, t]) => `<button data-a="cfgSet" data-k="forceLang" data-v="${v}" class="${(draft.forceLang || '') === v ? 'on' : ''}">${t}</button>`).join('')}</div>
+      <div class="card"><div class="seg" data-notr>${[['', '👤 Выбор'], ['uk', '🇺🇦 UK'], ['ru', '💩 RU'], ['en', '🇬🇧 EN']].map(([v, t]) => `<button data-a="cfgSet" data-k="forceLang" data-v="${v}" class="${(draft.forceLang || '') === v ? 'on' : ''}">${t}</button>`).join('')}</div>
         <p class="hint">Если выбран язык — он включится у всех пользователей при следующем открытии, а переключатель языка в профиле скроется. Бот тоже будет писать на этом языке.</p></div>
       <div class="section-h"><span>⚙️ Функции</span></div>
       <div class="list">
