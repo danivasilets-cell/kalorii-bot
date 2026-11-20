@@ -61,6 +61,8 @@ export default {
     ctx.waitUntil((async () => {
       // Бесплатный план — до 50 внешних запросов за запуск: сначала напоминания, остаток — рассылке.
       let used = 0;
+      if (new Date().getUTCMinutes() % 30 === 0) { try { await env.DB.put('cron:last', String(Date.now())); } catch {} }
+      try { await processScheduled(env); } catch (e) { console.log('scheduled bc error', e && e.stack); }
       try { used = await processOneOff(env, 20); } catch (e) { console.log('one-off error', e && e.stack); }
       try { used += await processReminders(env, 45 - used); } catch (e) { console.log('reminders error', e && e.stack); }
       try { if (used < 40) await processBroadcast(env, 45 - used); } catch (e) { console.log('broadcast error', e && e.stack); }
@@ -82,7 +84,7 @@ const send = (env, chat_id, text, extra = {}) =>
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 const appUrl = (env) => env.APP_URL || DEFAULT_APP_URL;
 const isOwner = (env, id) => String(id) === String(env.OWNER_ID);
-const fmtDate = (ts) => new Date(ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+const fmtDate = (ts) => new Date(ts).toLocaleString('ru-RU', { timeZone: 'Europe/Kyiv', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 const userLabel = (m) => `${esc(m.n || 'Без имени')}${m.u ? ' @' + esc(m.u) : ''}`;
 
 function openAppKeyboard(env, text = BOT_TR.uk.open) {
@@ -136,6 +138,14 @@ async function handleUpdate(u, env, ctx) {
     if (await ownerCommand(env, msg, cmd, arg, ctx)) return;
   }
 
+  const meta0 = isOwner(env, from.id) ? null : await getMeta(env, from.id);
+  if (meta0 && meta0.x) {
+    const L = T(await userLang(env, from.id, from));
+    await send(env, from.id, L === BOT_TR.en ? '⛔️ Access restricted.' : L === BOT_TR.ru ? '⛔️ Доступ ограничен.' : '⛔️ Доступ обмежено.');
+    return;
+  }
+  const sup = await admGet(env, 'sup', {});
+
   if (cmd === '/start') {
     const res = await touchUser(env, from);
     if (res && res.isNew && arg.startsWith('ref_')) await registerReferral(env, from, arg.slice(4));
@@ -146,7 +156,7 @@ async function handleUpdate(u, env, ctx) {
       if (res && res.isNew && env.OWNER_ID && !isOwner(env, from.id)) await send(env, env.OWNER_ID, `🆕 Новый пользователь (челлендж): ${userLabel(res.m)} (<code>${from.id}</code>)`);
       return;
     }
-    await send(env, from.id, L.hello(esc(from.first_name || '')), { reply_markup: openAppKeyboard(env, L.open) });
+    await send(env, from.id, sup.hello ? sup.hello.replace(/\{name\}/g, esc(from.first_name || '')) : L.hello(esc(from.first_name || '')), { reply_markup: openAppKeyboard(env, L.open) });
     if (false) await send(env, from.id,
       `👋 Привет, <b>${esc(from.first_name || '')}</b>!\n\n` +
       `Я помогу считать калории, белки, жиры и углеводы.\n\n` +
@@ -162,7 +172,7 @@ async function handleUpdate(u, env, ctx) {
 
   if (cmd === '/help') {
     const L = T(await userLang(env, from.id, from));
-    await send(env, from.id, L.help, { reply_markup: openAppKeyboard(env, L.open) });
+    await send(env, from.id, sup.help || L.help, { reply_markup: openAppKeyboard(env, L.open) });
     if (false) await send(env, from.id,
       `ℹ️ <b>Как пользоваться</b>\n\n` +
       `1. Откройте дневник кнопкой ниже или кнопкой «Открыть» слева от поля ввода.\n` +
@@ -187,8 +197,19 @@ async function handleUpdate(u, env, ctx) {
   }
 
   // Любое другое сообщение пользователя — пересылаем владельцу.
-  await touchUser(env, from);
+  const tu = await touchUser(env, from);
+  const Lu = T(await userLang(env, from.id, from));
+  if (sup.off) {
+    await send(env, from.id, Lu === BOT_TR.en ? '📭 Messages are not accepted right now.' : Lu === BOT_TR.ru ? '📭 Сейчас сообщения не принимаются.' : '📭 Зараз повідомлення не приймаються.');
+    return;
+  }
   if (!env.OWNER_ID) return;
+  try {
+    const ib = (await env.DB.get('ib', 'json')) || [];
+    ib.unshift({ t: Date.now(), id: String(from.id), n: [from.first_name, from.last_name].filter(Boolean).join(' ').slice(0, 40), txt: (text || (msg.photo ? '[фото]' : msg.sticker ? '[стикер]' : msg.video ? '[видео]' : msg.document ? '[файл]' : '[медиа]')).slice(0, 200) });
+    await env.DB.put('ib', JSON.stringify(ib.slice(0, 30)));
+  } catch {}
+  if (tu && tu.m && tu.m.mu) { await send(env, from.id, sup.auto || Lu.sent); return; }
   const fwd = await tg(env, 'forwardMessage', { chat_id: env.OWNER_ID, from_chat_id: from.id, message_id: msg.message_id });
   const info = await send(env, env.OWNER_ID,
     `💬 Сообщение от ${userLabel({ n: [from.first_name, from.last_name].filter(Boolean).join(' '), u: from.username })} (<code>${from.id}</code>)\n` +
@@ -196,7 +217,7 @@ async function handleUpdate(u, env, ctx) {
   const ttl = { expirationTtl: 60 * 60 * 24 * 30 };
   if (fwd.ok) await env.DB.put(`r:${fwd.result.message_id}`, String(from.id), ttl);
   if (info.ok) await env.DB.put(`r:${info.result.message_id}`, String(from.id), ttl);
-  await send(env, from.id, T(await userLang(env, from.id, from)).sent);
+  await send(env, from.id, sup.auto || Lu.sent);
 }
 
 // ---------------- Команды владельца ----------------
@@ -213,9 +234,16 @@ async function ownerCommand(env, msg, cmd, arg, ctx) {
     }
   }
 
+  if (await adminCommand(env, msg, cmd, arg)) return true;
+
   switch (cmd) {
     case '/admin':
-    case '/commands':
+    case '/commands': {
+      const h = adminHome(env);
+      await send(env, me, h.text, { reply_markup: h.kb });
+      return true;
+    }
+    case '/admin_old':
       await send(env, me,
         `🛠 <b>Команды владельца</b>\n\n` +
         `/stats — статистика\n` +
@@ -271,11 +299,11 @@ async function ownerCommand(env, msg, cmd, arg, ctx) {
         return true;
       }
       await env.DB.put('bc:draft', JSON.stringify(draft), { expirationTtl: 3600 });
-      const total = (await allUsers(env)).filter((u) => !u.m.b && !isOwner(env, u.id)).length;
+      const total = (await allUsers(env)).filter((u) => !u.m.b && !u.m.x && !isOwner(env, u.id)).length;
       await send(env, me, '👇 Так увидят сообщение пользователи:');
       if (draft.text) await send(env, me, draft.text);
       else await tg(env, 'copyMessage', { chat_id: me, from_chat_id: me, message_id: draft.copy });
-      const users = (await allUsers(env)).filter((u) => !u.m.b && !isOwner(env, u.id));
+      const users = (await allUsers(env)).filter((u) => !u.m.b && !u.m.x && !isOwner(env, u.id));
       const now = Date.now();
       const rows = Object.entries(SEGMENTS).map(([k, [t, f]]) => [{ text: `📣 ${t} (${users.filter((u) => f(u, now)).length})`, callback_data: 'bc:go:' + k }]);
       rows.push([{ text: '✖️ Отмена', callback_data: 'bc:no' }]);
@@ -309,6 +337,7 @@ async function ownerCommand(env, msg, cmd, arg, ctx) {
 async function handleCallback(q, env, ctx) {
   const me = q.from.id;
   if (!isOwner(env, me)) return tg(env, 'answerCallbackQuery', { callback_query_id: q.id });
+  if (/^(adm|cf):/.test(q.data || '')) return adminCallback(q, env);
   const edit = (text) => tg(env, 'editMessageText', { chat_id: me, message_id: q.message.message_id, text, parse_mode: 'HTML' });
 
   if (q.data === 'bc:no') {
@@ -323,8 +352,8 @@ async function handleCallback(q, env, ctx) {
       await edit('⏳ Уже идёт рассылка');
     } else {
       const now = Date.now();
-      const ids = (await allUsers(env)).filter((u) => !u.m.b && !isOwner(env, u.id) && seg[1](u, now)).map((u) => u.id);
-      await env.DB.put('bc:job', JSON.stringify({ draft, from: me, ids, i: 0, ok: 0, fail: 0 }));
+      const ids = (await allUsers(env)).filter((u) => !u.m.b && !u.m.x && !isOwner(env, u.id) && seg[1](u, now)).map((u) => u.id);
+      await env.DB.put('bc:job', JSON.stringify({ draft, from: me, ids, i: 0, ok: 0, fail: 0, seg: seg[0] }));
       await env.DB.delete('bc:draft');
       await edit(`🚀 Рассылка «${seg[0]}» запущена: ${ids.length} получателей. По ${BATCH} сообщений в минуту — пришлю отчёт.`);
       await processBroadcast(env);
@@ -353,6 +382,7 @@ async function processBroadcast(env, budget = BATCH) {
   }
   if (job.i >= job.ids.length) {
     await env.DB.delete('bc:job');
+    await pushHistory(env, job);
     await send(env, job.from, `✅ <b>Рассылка завершена</b>\n\nДоставлено: ${job.ok}\nНе доставлено: ${job.fail}`);
   } else {
     await env.DB.put('bc:job', JSON.stringify(job));
@@ -463,15 +493,7 @@ async function setup(url, env) {
   await tg(env, 'setMyCommands', { language_code: 'en', commands: [{ command: 'start', description: 'Open diary' }, { command: 'help', description: 'Help' }] });
   results.ownerCommands = await tg(env, 'setMyCommands', {
     scope: { type: 'chat', chat_id: Number(env.OWNER_ID) },
-    commands: [
-      { command: 'admin', description: '🛠 Все команды владельца' },
-      { command: 'stats', description: '📊 Статистика' },
-      { command: 'users', description: '👥 Пользователи' },
-      { command: 'broadcast', description: '📣 Рассылка' },
-      { command: 'reply', description: '💬 Написать пользователю' },
-      { command: 'cancel', description: '⏹ Остановить рассылку' },
-      { command: 'start', description: 'Открыть дневник' },
-    ],
+    commands: [...ADMIN_CMDS.map(([c, , , d]) => ({ command: c, description: d.slice(0, 250) }))].slice(0, 100),
   });
   results.menuButton = await tg(env, 'setChatMenuButton', {
     menu_button: { type: 'web_app', text: 'Відкрити', web_app: { url: appUrl(env) } },
@@ -503,16 +525,21 @@ async function userFromBody(req, env, maxLen = 3_000_000) {
   try { body = JSON.parse(text); } catch { return { error: json({ ok: false, error: 'Неверный формат запроса' }, 400) }; }
   const user = await verifyInitData(body.initData, env.BOT_TOKEN);
   if (!user) return { error: json({ ok: false, error: 'Откройте приложение из Telegram' }, 401) };
+  if (await isBanned(env, user.id)) return { error: json({ ok: false, error: 'Доступ ограничен' }, 403) };
   return { body, user };
 }
 
 // ---------- Дневные лимиты ИИ на пользователя (чтобы не выйти за бесплатную квоту) ----------
 const AI_LIMITS = { photo: 15, chat: 40, parse: 60, voice: 30 };
-async function takeQuota(env, uid, kind) {
+async function takeQuota(env, uid, kind, ai) {
+  ai = ai || (await aiSettings(env));
+  if (ai.off) return false;
   const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const key = `q:${uid}:${day}`;
   const q = (await env.DB.get(key, 'json')) || {};
-  const limit = isOwner(env, uid) ? AI_LIMITS[kind] * 5 : AI_LIMITS[kind];
+  const base = (ai.limits && ai.limits[kind]) || AI_LIMITS[kind];
+  const m = isOwner(env, uid) ? null : await getMeta(env, uid);
+  const limit = isOwner(env, uid) ? base * 5 : m && m.v ? base * 3 : base;
   if ((q[kind] || 0) >= limit) return false;
   q[kind] = (q[kind] || 0) + 1;
   await env.DB.put(key, JSON.stringify(q), { expirationTtl: 2 * 86400 });
@@ -569,7 +596,7 @@ async function apiAiPhoto(req, env) {
   if (!env.AI) return aiMissing();
   const b64 = String(body.image || '').replace(/^data:image\/\w+;base64,/, '');
   if (b64.length < 1000) return json({ ok: false, error: 'Нет изображения' }, 400);
-  if (!(await takeQuota(env, user.id, 'photo'))) return json({ ok: false, error: `Лимит распознаваний на сегодня исчерпан (${AI_LIMITS.photo}). Попробуйте завтра.` }, 429);
+  { const qe = await quotaError(env, user.id, 'photo'); if (qe) return json({ ok: false, error: qe }, 429); }
   const prompt = 'Ты — нутрициолог. Определи все блюда и продукты на фото еды и оцени вес каждой порции. ' + FOOD_JSON_RULES +
     ' Если на фото нет еды — верни [].';
   let text;
@@ -605,7 +632,7 @@ async function apiAiParse(req, env) {
   if (!env.AI) return aiMissing();
   const text = String(body.text || '').slice(0, 600);
   if (!text.trim()) return json({ ok: false, error: 'Пустой запрос' }, 400);
-  if (!(await takeQuota(env, user.id, 'parse'))) return json({ ok: false, error: 'Лимит на сегодня исчерпан' }, 429);
+  { const qe = await quotaError(env, user.id, 'parse'); if (qe) return json({ ok: false, error: qe }, 429); }
   const sys = 'Ты разбираешь фразу пользователя о съеденной еде. ' +
     'Ответ — ТОЛЬКО JSON-массив. Элемент: {"name": "продукт в именительном падеже, как в таблице калорийности", "grams": число или 0, "count": число штук или 0, "meal": "b"|"l"|"d"|"s"|null, "kcal": ккал на 100 г, "p": белки на 100 г, "f": жиры на 100 г, "c": углеводы на 100 г}. ' +
     'meal: b — завтрак, l — обед, d — ужин, s — перекус; null, если не сказано. Если указаны штуки (два яйца) — заполни count, а grams — общий вес. Числа словами переводи в цифры.';
@@ -624,7 +651,7 @@ async function apiAiVoice(req, env) {
   if (!env.AI) return aiMissing();
   const b64 = String(body.audio || '').replace(/^data:[^,]+,/, '');
   if (b64.length < 500) return json({ ok: false, error: 'Нет записи' }, 400);
-  if (!(await takeQuota(env, user.id, 'voice'))) return json({ ok: false, error: 'Лимит на сегодня исчерпан' }, 429);
+  { const qe = await quotaError(env, user.id, 'voice'); if (qe) return json({ ok: false, error: qe }, 429); }
   try {
     let r;
     try { r = await env.AI.run('@cf/openai/whisper-large-v3-turbo', { audio: b64, language: 'ru' }); }
@@ -643,7 +670,7 @@ async function apiAiChat(req, env) {
   const { error, body, user } = await userFromBody(req, env, 60000);
   if (error) return error;
   if (!env.AI) return aiMissing();
-  if (!(await takeQuota(env, user.id, 'chat'))) return json({ ok: false, error: `Лимит сообщений на сегодня исчерпан (${AI_LIMITS.chat}). Возвращайтесь завтра!` }, 429);
+  { const qe = await quotaError(env, user.id, 'chat'); if (qe) return json({ ok: false, error: qe }, 429); }
   const ctxText = JSON.stringify(body.context || {}).slice(0, 4000);
   const history = (Array.isArray(body.messages) ? body.messages : []).slice(-8)
     .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content || '').slice(0, 1200) }))
@@ -765,10 +792,13 @@ async function apiExport(req, env) {
 }
 
 // ---------- Журнал ошибок клиента ----------
-async function apiLog(req) {
+async function apiLog(req, env) {
   try {
     const t = (await req.text()).slice(0, 2000);
     console.log('client error', t);
+    let m = t;
+    try { const j = JSON.parse(t); m = j.msg || j.message || j.error || j.e || t; } catch {}
+    if (env && env.DB) await storeClientError(env, m);
   } catch {}
   return json({ ok: true });
 }
@@ -1036,6 +1066,12 @@ const SEGMENTS = {
   new: ['Новым за 7 дней', (u, now) => now - (u.m.j || 0) < 7 * 86400e3],
   active: ['Активным за 7 дней', (u, now) => now - (u.m.s || 0) < 7 * 86400e3],
   app: ['Кто открывал приложение', (u) => (u.m.o || 0) > 0],
+  noapp: ['Не открывали приложение', (u) => !((u.m.o || 0) > 0)],
+  uk: ['🇺🇦 Украинский язык', (u) => (u.m.l || 'uk') === 'uk'],
+  ru: ['💩 Русский язык', (u) => u.m.l === 'ru'],
+  en: ['🇬🇧 Английский язык', (u) => u.m.l === 'en'],
+  vip: ['⭐ VIP', (u) => !!u.m.v],
+  refs: ['Пришли по приглашению', (u) => !!u.m.r],
 };
 
 // =====================================================================
@@ -1116,3 +1152,760 @@ async function userLang(env, uid, from) {
   return mapLangCode(from && from.language_code);
 }
 const T = (lang) => BOT_TR[lang] || BOT_TR.uk;
+
+// =====================================================================
+//  v6: Панель владельца — 90+ команд (вызов: /admin)
+// =====================================================================
+const DAY = 86400e3;
+const TZ = 'Europe/Kyiv';
+const ago = (ts) => {
+  if (!ts) return '—';
+  const s = (Date.now() - ts) / 1000;
+  if (s < 60) return 'только что';
+  if (s < 3600) return `${Math.floor(s / 60)} мин назад`;
+  if (s < 86400) return `${Math.floor(s / 3600)} ч назад`;
+  return `${Math.floor(s / 86400)} дн назад`;
+};
+const pctOf = (a, b) => (b ? Math.round((a * 100) / b) : 0) + '%';
+const bar = (v, max, w = 12) => '▇'.repeat(max ? Math.max(v ? 1 : 0, Math.round((v / max) * w)) : 0) || '·';
+const kyivDay = (ts) => new Date(ts).toLocaleDateString('sv-SE', { timeZone: TZ }); // YYYY-MM-DD
+const kyivHM = (ts = Date.now()) => new Date(ts).toLocaleTimeString('ru-RU', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+const onOff = (a) => (/^(on|вкл|1|да|yes|true|\+)$/i.test(a || '') ? true : /^(off|выкл|0|нет|no|false|-)$/i.test(a || '') ? false : null);
+const yes = (b) => (b ? '✅ вкл' : '⛔️ выкл');
+const isId = (s) => /^\d{3,}$/.test(String(s || ''));
+
+async function getCfg(env) { return (await env.DB.get('config', 'json')) || {}; }
+async function setCfg(env, fn) { const c = await getCfg(env); fn(c); await env.DB.put('config', JSON.stringify(c)); return c; }
+async function admGet(env, k, def) { return (await env.DB.get('adm:' + k, 'json')) || def; }
+async function admSet(env, k, v) { await env.DB.put('adm:' + k, JSON.stringify(v)); }
+async function getMeta(env, id) { return (await env.DB.getWithMetadata(`u:${id}`)).metadata; }
+async function setMeta(env, id, fn) {
+  const m0 = await getMeta(env, id);
+  if (!m0) return null;
+  const m = { ...m0 };
+  fn(m);
+  await env.DB.put(`u:${id}`, '1', { metadata: m });
+  return m;
+}
+/** Поиск пользователя: ID, @username или часть имени. */
+async function findUser(env, q) {
+  q = String(q || '').trim();
+  if (!q) return null;
+  if (isId(q)) { const m = await getMeta(env, q); return m ? { id: q, m } : null; }
+  const users = await allUsers(env);
+  const s = q.replace(/^@/, '').toLowerCase();
+  return users.find((u) => (u.m.u || '').toLowerCase() === s) || users.find((u) => (u.m.n || '').toLowerCase().includes(s)) || null;
+}
+async function listKeys(env, prefix, maxPages = 5) {
+  const out = [];
+  let cursor;
+  for (let i = 0; i < maxPages; i++) {
+    const page = await env.DB.list({ prefix, cursor });
+    out.push(...page.keys);
+    if (page.list_complete) break;
+    cursor = page.cursor;
+  }
+  return out;
+}
+async function sendLong(env, chat, text, extra = {}) {
+  const parts = [];
+  let cur = '';
+  for (const line of String(text).split('\n')) {
+    if ((cur + line).length > 3800) { parts.push(cur); cur = ''; }
+    cur += (cur ? '\n' : '') + line;
+  }
+  if (cur) parts.push(cur);
+  for (let i = 0; i < parts.length; i++) await send(env, chat, parts[i], i === parts.length - 1 ? extra : {});
+}
+async function sendFile(env, chat, name, content, caption = '', type = 'text/csv') {
+  const fd = new FormData();
+  fd.append('chat_id', String(chat));
+  if (caption) fd.append('caption', caption.slice(0, 900));
+  fd.append('document', new Blob([type === 'text/csv' ? '﻿' + content : content], { type }), name);
+  return fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, { method: 'POST', body: fd }).then((x) => x.json());
+}
+const confirmKb = (action, param = '') => ({ inline_keyboard: [[{ text: '✅ Да, выполнить', callback_data: `cf:${action}:${param}` }, { text: '✖️ Отмена', callback_data: 'cf:no:' }]] });
+const userLine = (u, extra = '') => `${userLabel(u.m)}${u.m.x ? ' ⛔️' : ''}${u.m.v ? ' ⭐' : ''}${u.m.b ? ' 🚫' : ''} · <code>${u.id}</code>${extra}`;
+const usage = (fmt) => `Формат: <code>${fmt}</code>`;
+const activeUsers = (users) => users.filter((u) => !u.m.b && !u.m.x);
+
+// ---------- Лимиты ИИ и бан (используются API) ----------
+async function aiSettings(env) { return admGet(env, 'ai', { off: false, limits: {} }); }
+async function quotaError(env, uid, kind) {
+  const ai = await aiSettings(env);
+  if (ai.off) return 'ИИ временно отключён владельцем. Попробуйте позже.';
+  if (!(await takeQuota(env, uid, kind, ai))) return 'Лимит на сегодня исчерпан. Попробуйте завтра.';
+  return '';
+}
+async function isBanned(env, uid) { const m = await getMeta(env, uid); return !!(m && m.x); }
+
+// ---------- Журнал ошибок клиента ----------
+async function storeClientError(env, text) {
+  const key = `le:${kyivDay(Date.now())}`;
+  const arr = (await env.DB.get(key, 'json')) || [];
+  if (arr.length >= 30) return; // не больше 30 записей в день — бережём лимит KV
+  arr.push({ t: Date.now(), m: String(text).slice(0, 300) });
+  await env.DB.put(key, JSON.stringify(arr), { expirationTtl: 7 * 86400 });
+}
+
+// ---------- Отложенная рассылка (проверяется cron) ----------
+async function processScheduled(env) {
+  const s = await env.DB.get('bc:sched', 'json');
+  if (!s || s.at > Date.now() || (await env.DB.get('bc:job'))) return;
+  const ids = activeUsers(await allUsers(env)).filter((u) => !isOwner(env, u.id)).map((u) => u.id);
+  await env.DB.put('bc:job', JSON.stringify({ draft: s.draft, from: s.from, ids, i: 0, ok: 0, fail: 0, seg: 'Отложенная' }));
+  await env.DB.delete('bc:sched');
+  await send(env, s.from, `⏰ Отложенная рассылка запущена: ${ids.length} получателей.`);
+}
+async function pushHistory(env, job) {
+  const h = (await env.DB.get('bc:hist', 'json')) || [];
+  h.unshift({ t: Date.now(), n: job.ids.length, ok: job.ok, fail: job.fail, seg: job.seg || 'Всем', txt: job.draft.text ? job.draft.text.slice(0, 60) : '[медиа]' });
+  await env.DB.put('bc:hist', JSON.stringify(h.slice(0, 15)));
+}
+
+// ---------- Группы команд ----------
+const ADM_GROUPS = {
+  st: '📊 Статистика',
+  us: '👥 Пользователи',
+  mod: '🛡 Модерация',
+  bc: '📣 Рассылки',
+  app: '📱 Приложение',
+  food: '🍎 Продукты',
+  ai: '🤖 ИИ',
+  sup: '💬 Поддержка',
+  bot: '🤖 Профиль бота',
+  sys: '⚙️ Система',
+};
+
+/** Переключатель настройки приложения (вкл/выкл). */
+const cfgToggle = (key, title) => async ({ env, arg }) => {
+  const v = onOff(arg);
+  const c = await getCfg(env);
+  const cur = c[key] !== false;
+  if (v === null) return `${title}: ${yes(cur)}\n${usage(`/${key.toLowerCase()} on|off`)}`;
+  await setCfg(env, (x) => { x[key] = v; });
+  return `${title}: ${yes(v)}\nУ пользователей обновится в течение минуты.`;
+};
+const cfgText = (key, title, fmt) => async ({ env, arg }) => {
+  if (!arg) return `${title}: <b>${esc((await getCfg(env))[key] || '—')}</b>\n${usage(fmt)}`;
+  await setCfg(env, (x) => { x[key] = arg.slice(0, 120); });
+  return `✅ ${title}: <b>${esc(arg.slice(0, 120))}</b>`;
+};
+
+// [команда, группа, аргументы, описание, функция | null — обрабатывается в ownerCommand]
+const ADMIN_CMDS = [
+  ['admin', 'sys', '', 'Панель владельца — все команды', null],
+
+  // ---------- 📊 Статистика ----------
+  ['stats', 'st', '', 'Общая статистика', null],
+  ['today', 'st', '', 'Сводка за сегодня', async ({ env }) => {
+    const users = await allUsers(env); const d = kyivDay(Date.now());
+    const u = (await env.DB.get(`us:${today8()}`, 'json')) || {};
+    const isToday = (ts) => ts && kyivDay(ts) === d;
+    return `📅 <b>Сегодня, ${d}</b>\n\n🆕 Новых: <b>${users.filter((x) => isToday(x.m.j)).length}</b>\n🔥 Заходили: <b>${users.filter((x) => isToday(x.m.s)).length}</b>\n` +
+      `📱 Сессий в приложении: <b>${u._sessions || 0}</b>\n🧩 Действий: <b>${Object.entries(u).filter(([k]) => k[0] !== '_').reduce((s, [, v]) => s + v, 0)}</b>`;
+  }],
+  ['week', 'st', '', 'Новые пользователи по дням (7 дн)', async ({ env }) => {
+    const users = await allUsers(env);
+    const days = Array.from({ length: 7 }, (_, i) => kyivDay(Date.now() - (6 - i) * DAY));
+    const cnt = days.map((d) => users.filter((u) => u.m.j && kyivDay(u.m.j) === d).length);
+    const max = Math.max(...cnt);
+    return `📈 <b>Новые за неделю: ${cnt.reduce((a, b) => a + b, 0)}</b>\n\n<code>${days.map((d, i) => `${d.slice(5)} ${bar(cnt[i], max)} ${cnt[i]}`).join('\n')}</code>`;
+  }],
+  ['month', 'st', '', 'Новые пользователи за 30 дней', async ({ env }) => {
+    const users = await allUsers(env);
+    const weeks = [3, 2, 1, 0].map((w) => users.filter((u) => u.m.j && Date.now() - u.m.j >= w * 7 * DAY && Date.now() - u.m.j < (w + 1) * 7 * DAY).length);
+    const max = Math.max(...weeks);
+    return `🗓 <b>Новые за 4 недели: ${weeks.reduce((a, b) => a + b, 0)}</b>\n\n<code>${weeks.map((n, i) => `${['3 нед. назад', '2 нед. назад', 'прошлая нед.', 'эта неделя  '][i]} ${bar(n, max)} ${n}`).join('\n')}</code>`;
+  }],
+  ['growth', 'st', '', 'Рост аудитории (8 недель)', async ({ env }) => {
+    const users = await allUsers(env);
+    const pts = Array.from({ length: 8 }, (_, i) => { const t = Date.now() - (7 - i) * 7 * DAY; return [kyivDay(t).slice(5), users.filter((u) => (u.m.j || 0) <= t).length]; });
+    const max = Math.max(...pts.map((p) => p[1]));
+    return `🌱 <b>Рост аудитории</b>\n\n<code>${pts.map(([d, n]) => `${d} ${bar(n, max)} ${n}`).join('\n')}</code>`;
+  }],
+  ['retention', 'st', '', 'Удержание: кто вернулся', async ({ env }) => {
+    const users = (await allUsers(env)).filter((u) => u.m.j && Date.now() - u.m.j > DAY);
+    const back1 = users.filter((u) => (u.m.s || 0) - u.m.j > DAY).length;
+    const old7 = users.filter((u) => Date.now() - u.m.j > 7 * DAY);
+    const live7 = old7.filter((u) => Date.now() - (u.m.s || 0) < 7 * DAY).length;
+    return `🔁 <b>Удержание</b>\n\nВернулись после первого дня: <b>${back1}</b> из ${users.length} (${pctOf(back1, users.length)})\n` +
+      `Старше недели и активны за 7 дн: <b>${live7}</b> из ${old7.length} (${pctOf(live7, old7.length)})`;
+  }],
+  ['features', 'st', '[дни]', 'Популярность функций', async ({ env, arg }) => {
+    const n = Math.min(Math.max(parseInt(arg, 10) || 7, 1), 30);
+    const u = Object.entries(await usageLastDays(env, n)).filter(([k]) => FEATURE_NAMES[k]).sort((a, b) => b[1] - a[1]);
+    const max = u.length ? u[0][1] : 0;
+    return `🧩 <b>Функции за ${n} дн</b>\n\n<code>${u.map(([k, v]) => `${FEATURE_NAMES[k].padEnd(12)} ${bar(v, max, 10)} ${v}`).join('\n') || 'нет данных'}</code>`;
+  }],
+  ['top', 'st', '[N]', 'Самые активные (по открытиям)', async ({ env, arg }) => {
+    const n = Math.min(Math.max(parseInt(arg, 10) || 15, 1), 50);
+    const users = (await allUsers(env)).sort((a, b) => (b.m.o || 0) - (a.m.o || 0)).slice(0, n);
+    return `🏆 <b>Топ-${users.length} по открытиям</b>\n\n${users.map((u, i) => `${i + 1}. ${userLine(u, ` · 📱${u.m.o || 0}`)}`).join('\n') || 'Пока никого'}`;
+  }],
+  ['langs', 'st', '', 'Языки пользователей', async ({ env }) => {
+    const users = await allUsers(env); const c = {};
+    for (const u of users) c[u.m.l || '?'] = (c[u.m.l || '?'] || 0) + 1;
+    const names = { uk: '🇺🇦 Українська', ru: '💩 Русский', en: '🇬🇧 English', '?': '❔ Не выбран' };
+    return `🌐 <b>Языки</b>\n\n${Object.entries(c).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${names[k] || k}: <b>${v}</b> (${pctOf(v, users.length)})`).join('\n')}\n\nЯзык для всех: /forcelang`;
+  }],
+  ['sources', 'st', '', 'Откуда пришли + топ пригласивших', async ({ env }) => {
+    const users = await allUsers(env);
+    const refs = users.filter((u) => u.m.r);
+    const by = {};
+    for (const u of refs) by[u.m.r] = (by[u.m.r] || 0) + 1;
+    const top = Object.entries(by).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    const names = Object.fromEntries(users.map((u) => [u.id, u]));
+    return `🧭 <b>Источники</b>\n\nСами нашли бота: <b>${users.length - refs.length}</b>\nПо приглашению: <b>${refs.length}</b> (${pctOf(refs.length, users.length)})\n\n` +
+      `🤝 <b>Топ пригласивших</b>\n${top.map(([id, n], i) => `${i + 1}. ${names[id] ? userLabel(names[id].m) : id} — ${n}`).join('\n') || 'пока никого'}`;
+  }],
+  ['aiusage', 'st', '', 'Расход ИИ за сегодня', async ({ env }) => {
+    const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const keys = (await listKeys(env, 'q:')).filter((k) => k.name.endsWith(':' + day));
+    const tot = {}; const per = [];
+    for (const k of keys.slice(0, 60)) {
+      const q = (await env.DB.get(k.name, 'json')) || {};
+      let s = 0;
+      for (const [kind, v] of Object.entries(q)) { tot[kind] = (tot[kind] || 0) + v; s += v; }
+      per.push([k.name.split(':')[1], s]);
+    }
+    per.sort((a, b) => b[1] - a[1]);
+    return `🤖 <b>ИИ сегодня</b> (по UTC)\n\nПользователей: <b>${keys.length}</b>\n📷 Фото: ${tot.photo || 0}\n🎙 Голос: ${tot.voice || 0}\n✍️ Разбор текста: ${tot.parse || 0}\n💬 Чат: ${tot.chat || 0}\n\n` +
+      `Больше всех: ${per.slice(0, 5).map(([id, n]) => `<code>${id}</code> (${n})`).join(', ') || '—'}`;
+  }],
+  ['diary', 'st', '', 'Кто заполнял дневник сегодня', async ({ env }) => {
+    const keys = await listKeys(env, 'sm:');
+    const d = new Date().toISOString().slice(0, 10);
+    const rows = [];
+    for (const k of keys.slice(0, 80)) { const s = await env.DB.get(k.name, 'json'); if (s && s.date >= new Date(Date.now() - DAY).toISOString().slice(0, 10)) rows.push(s); }
+    const avg = (f) => (rows.length ? Math.round(rows.reduce((a, s) => a + f(s), 0) / rows.length) : 0);
+    const inGoal = rows.filter((s) => s.gk && Math.abs(s.k - s.gk - (s.burn || 0)) <= (s.gk + (s.burn || 0)) * 0.1).length;
+    return `📝 <b>Дневник за последние сутки</b> (${d})\n\nЗаполняли: <b>${rows.length}</b>\nСредне: ${avg((s) => s.k)} ккал · белок ${avg((s) => s.p)} г · вода ${avg((s) => s.w)} мл\nСредне записей: ${avg((s) => s.e)}\nВ норме калорий (±10%): <b>${inGoal}</b> (${pctOf(inGoal, rows.length)})`;
+  }],
+
+  // ---------- 👥 Пользователи ----------
+  ['users', 'us', '[N]', 'Последние зарегистрированные', null],
+  ['user', 'us', 'id|@ник|имя', 'Карточка пользователя', async ({ env, arg }) => {
+    const u = await findUser(env, arg);
+    if (!u) return arg ? '🤷 Не найден' : usage('/user 123456789');
+    const [rc, rs, sm, note, ch] = await Promise.all([env.DB.get(`rc:${u.id}`), env.DB.get(`rs:${u.id}`, 'json'), env.DB.get(`sm:${u.id}`, 'json'), env.DB.get(`nt:${u.id}`), env.DB.get(`uc:${u.id}`, 'json')]);
+    const q = (await env.DB.get(`q:${u.id}:${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`, 'json')) || {};
+    const rem = rs && rs.items ? Object.entries(rs.items).filter(([, v]) => v && v.on).map(([k]) => k).join(', ') : '';
+    return `👤 <b>${userLabel(u.m)}</b>\nID: <code>${u.id}</code>\n\n` +
+      `📅 С нами с: ${u.m.j ? fmtDate(u.m.j) : '—'}\n👀 Последний визит: ${ago(u.m.s)}\n📱 Открытий приложения: ${u.m.o || 0}\n🌐 Язык: ${u.m.l || '—'}\n` +
+      `🤝 Пригласил: ${u.m.r ? `<code>${u.m.r}</code>` : '—'} · Привёл: ${Number(rc) || 0}\n🔔 Напоминания: ${rem || '—'}\n🏁 Челленджей: ${(ch || []).length}\n` +
+      `🤖 ИИ сегодня: ${Object.entries(q).map(([k, v]) => `${k} ${v}`).join(', ') || '—'}\n` +
+      (sm ? `📝 Последний день (${sm.date}): ${sm.k}/${sm.gk} ккал, вода ${sm.w} мл\n` : '') +
+      `🏷 Теги: ${(u.m.t || []).join(', ') || '—'}\n` +
+      `${u.m.v ? '⭐ VIP\n' : ''}${u.m.x ? `⛔️ Забанен${u.m.x !== 1 ? ': ' + esc(u.m.x) : ''}\n` : ''}${u.m.mu ? '🔇 Сообщения не пересылаются\n' : ''}${u.m.b ? '🚫 Заблокировал бота\n' : ''}` +
+      (note ? `\n🗒 ${esc(note)}` : '') +
+      `\n\n<code>/reply ${u.id} </code>— написать`;
+  }],
+  ['find', 'us', 'текст', 'Поиск по имени или @нику', async ({ env, arg }) => {
+    if (!arg) return usage('/find Анна');
+    const s = arg.replace(/^@/, '').toLowerCase();
+    const r = (await allUsers(env)).filter((u) => (u.m.n || '').toLowerCase().includes(s) || (u.m.u || '').toLowerCase().includes(s) || u.id.includes(s)).slice(0, 30);
+    return `🔎 Найдено: ${r.length}\n\n${r.map((u) => userLine(u)).join('\n') || '—'}`;
+  }],
+  ['recent', 'us', '[N]', 'Недавно заходившие', async ({ env, arg }) => {
+    const n = Math.min(Math.max(parseInt(arg, 10) || 20, 1), 50);
+    const users = (await allUsers(env)).sort((a, b) => (b.m.s || 0) - (a.m.s || 0)).slice(0, n);
+    return `👀 <b>Недавно заходили</b>\n\n${users.map((u, i) => `${i + 1}. ${userLine(u, ` · ${ago(u.m.s)}`)}`).join('\n')}`;
+  }],
+  ['inactive', 'us', '[дни]', 'Давно не заходили', async ({ env, arg }) => {
+    const d = Math.max(parseInt(arg, 10) || 14, 1);
+    const r = (await allUsers(env)).filter((u) => Date.now() - (u.m.s || 0) > d * DAY).sort((a, b) => (a.m.s || 0) - (b.m.s || 0));
+    return `😴 <b>Не заходили ${d}+ дн: ${r.length}</b>\n\n${r.slice(0, 30).map((u) => userLine(u, ` · ${ago(u.m.s)}`)).join('\n') || '—'}\n\nНапомнить им: /broadcast → «Неактивным»`;
+  }],
+  ['noapp', 'us', '', 'Ни разу не открыли приложение', async ({ env }) => {
+    const r = (await allUsers(env)).filter((u) => !(u.m.o > 0));
+    return `📵 <b>Не открывали приложение: ${r.length}</b>\n\n${r.slice(0, 30).map((u) => userLine(u)).join('\n') || '—'}`;
+  }],
+  ['refs', 'us', 'id', 'Кого привёл пользователь', async ({ env, arg }) => {
+    if (!isId(arg)) return usage('/refs 123456789');
+    const r = (await allUsers(env)).filter((u) => String(u.m.r) === arg);
+    return `🤝 <b>Пригласил ${r.length}</b>\n\n${r.map((u) => userLine(u, ` · ${fmtDate(u.m.j || 0)}`)).join('\n') || '—'}`;
+  }],
+  ['note', 'us', 'id [текст | -]', 'Заметка о пользователе', async ({ env, args }) => {
+    const [id, ...w] = args;
+    if (!isId(id)) return usage('/note 123456789 любит гречку') + '\nУдалить: <code>/note id -</code>';
+    const t = w.join(' ');
+    if (!t) return `🗒 ${esc((await env.DB.get(`nt:${id}`)) || 'Заметки нет')}`;
+    if (t === '-') { await env.DB.delete(`nt:${id}`); return '🗑 Заметка удалена'; }
+    await env.DB.put(`nt:${id}`, t.slice(0, 1000));
+    return '✅ Заметка сохранена';
+  }],
+  ['notes', 'us', '', 'Все заметки', async ({ env }) => {
+    const keys = await listKeys(env, 'nt:');
+    const rows = [];
+    for (const k of keys.slice(0, 30)) rows.push(`<code>${k.name.slice(3)}</code> — ${esc(((await env.DB.get(k.name)) || '').slice(0, 80))}`);
+    return `🗒 <b>Заметки (${keys.length})</b>\n\n${rows.join('\n') || '—'}`;
+  }],
+  ['tag', 'us', 'id тег', 'Добавить тег', async ({ env, args }) => {
+    const [id, tag] = args;
+    if (!isId(id) || !tag) return usage('/tag 123456789 тестер');
+    const m = await setMeta(env, id, (x) => { x.t = [...new Set([...(x.t || []), tag.toLowerCase().slice(0, 16)])].slice(0, 5); });
+    return m ? `🏷 Теги: ${m.t.join(', ')}` : '🤷 Пользователь не найден';
+  }],
+  ['untag', 'us', 'id тег', 'Убрать тег', async ({ env, args }) => {
+    const [id, tag] = args;
+    if (!isId(id) || !tag) return usage('/untag 123456789 тестер');
+    const m = await setMeta(env, id, (x) => { x.t = (x.t || []).filter((t) => t !== tag.toLowerCase()); if (!x.t.length) delete x.t; });
+    return m ? `🏷 Теги: ${(m.t || []).join(', ') || '—'}` : '🤷 Пользователь не найден';
+  }],
+  ['tagged', 'us', '[тег]', 'Пользователи с тегом / все теги', async ({ env, arg }) => {
+    const users = await allUsers(env);
+    if (!arg) {
+      const c = {};
+      for (const u of users) for (const t of u.m.t || []) c[t] = (c[t] || 0) + 1;
+      return `🏷 <b>Теги</b>\n\n${Object.entries(c).map(([t, n]) => `${esc(t)} — ${n}`).join('\n') || 'Тегов пока нет. Добавить: /tag'}`;
+    }
+    const r = users.filter((u) => (u.m.t || []).includes(arg.toLowerCase()));
+    return `🏷 <b>${esc(arg)}: ${r.length}</b>\n\n${r.map((u) => userLine(u)).join('\n') || '—'}`;
+  }],
+  ['setlang', 'us', 'id uk|ru|en', 'Сменить язык бота пользователю', async ({ env, args }) => {
+    const [id, l] = args;
+    if (!isId(id) || !BOT_TR[l]) return usage('/setlang 123456789 uk');
+    return (await setMeta(env, id, (x) => { x.l = l; })) ? `✅ Язык бота для <code>${id}</code>: ${l}` : '🤷 Пользователь не найден';
+  }],
+  ['forget', 'us', 'id', 'Удалить пользователя из базы', async ({ env, me, arg }) => {
+    if (!isId(arg)) return usage('/forget 123456789');
+    const m = await getMeta(env, arg);
+    if (!m) return '🤷 Пользователь не найден';
+    await send(env, me, `Удалить ${userLabel(m)} (<code>${arg}</code>) из базы бота? Дневник в его телефоне останется.`, { reply_markup: confirmKb('forget', arg) });
+  }],
+  ['export', 'us', '', 'Выгрузить всех в CSV', async ({ env, me }) => {
+    const users = await allUsers(env);
+    const q = (s) => `"${String(s == null ? '' : s).replace(/"/g, '""')}"`;
+    const rows = [['id', 'имя', 'username', 'первый вход', 'последний визит', 'открытий', 'язык', 'пригласил', 'теги', 'vip', 'бан', 'заблокировал бота'].map(q).join(';')];
+    for (const u of users) rows.push([u.id, u.m.n, u.m.u, u.m.j ? fmtDate(u.m.j) : '', u.m.s ? fmtDate(u.m.s) : '', u.m.o || 0, u.m.l || '', u.m.r || '', (u.m.t || []).join(' '), u.m.v ? 1 : '', u.m.x ? 1 : '', u.m.b ? 1 : ''].map(q).join(';'));
+    const r = await sendFile(env, me, `users_${kyivDay(Date.now())}.csv`, rows.join('\n'), `👥 ${users.length} пользователей`);
+    if (!r.ok) return `⚠️ ${esc(r.description)}`;
+  }],
+
+  // ---------- 🛡 Модерация ----------
+  ['ban', 'mod', 'id [причина]', 'Забанить (бот и ИИ перестанут работать)', async ({ env, args }) => {
+    const [id, ...w] = args;
+    if (!isId(id)) return usage('/ban 123456789 спам');
+    if (isOwner(env, id)) return '🙃 Себя забанить нельзя';
+    const m = await setMeta(env, id, (x) => { x.x = w.join(' ').slice(0, 60) || 1; });
+    return m ? `⛔️ ${userLabel(m)} забанен.\nСнять: <code>/unban ${id}</code>` : '🤷 Пользователь не найден';
+  }],
+  ['unban', 'mod', 'id', 'Разбанить', async ({ env, arg }) => {
+    if (!isId(arg)) return usage('/unban 123456789');
+    const m = await setMeta(env, arg, (x) => { delete x.x; });
+    return m ? `✅ ${userLabel(m)} разбанен` : '🤷 Пользователь не найден';
+  }],
+  ['banned', 'mod', '', 'Список забаненных', async ({ env }) => {
+    const r = (await allUsers(env)).filter((u) => u.m.x);
+    return `⛔️ <b>Забанены: ${r.length}</b>\n\n${r.map((u) => userLine(u, u.m.x !== 1 ? ` · ${esc(u.m.x)}` : '')).join('\n') || '—'}`;
+  }],
+  ['vip', 'mod', 'id', 'Выдать VIP (лимиты ИИ ×3)', async ({ env, arg }) => {
+    if (!isId(arg)) return usage('/vip 123456789');
+    const m = await setMeta(env, arg, (x) => { x.v = 1; });
+    return m ? `⭐ ${userLabel(m)} теперь VIP — лимиты ИИ ×3` : '🤷 Пользователь не найден';
+  }],
+  ['unvip', 'mod', 'id', 'Снять VIP', async ({ env, arg }) => {
+    if (!isId(arg)) return usage('/unvip 123456789');
+    const m = await setMeta(env, arg, (x) => { delete x.v; });
+    return m ? `✅ VIP снят: ${userLabel(m)}` : '🤷 Пользователь не найден';
+  }],
+  ['vips', 'mod', '', 'Список VIP', async ({ env }) => {
+    const r = (await allUsers(env)).filter((u) => u.m.v);
+    return `⭐ <b>VIP: ${r.length}</b>\n\n${r.map((u) => userLine(u)).join('\n') || '—'}`;
+  }],
+  ['mute', 'mod', 'id', 'Не пересылать мне его сообщения', async ({ env, arg }) => {
+    if (!isId(arg)) return usage('/mute 123456789');
+    const m = await setMeta(env, arg, (x) => { x.mu = 1; });
+    return m ? `🔇 Сообщения ${userLabel(m)} больше не пересылаются` : '🤷 Пользователь не найден';
+  }],
+  ['unmute', 'mod', 'id', 'Снова пересылать сообщения', async ({ env, arg }) => {
+    if (!isId(arg)) return usage('/unmute 123456789');
+    const m = await setMeta(env, arg, (x) => { delete x.mu; });
+    return m ? `🔊 Сообщения ${userLabel(m)} снова пересылаются` : '🤷 Пользователь не найден';
+  }],
+  ['muted', 'mod', '', 'Список заглушённых', async ({ env }) => {
+    const r = (await allUsers(env)).filter((u) => u.m.mu);
+    return `🔇 <b>Заглушены: ${r.length}</b>\n\n${r.map((u) => userLine(u)).join('\n') || '—'}`;
+  }],
+  ['quota', 'mod', 'id [reset]', 'Лимиты ИИ пользователя / сброс', async ({ env, args }) => {
+    const [id, act] = args;
+    if (!isId(id)) return usage('/quota 123456789') + '\nСбросить: <code>/quota id reset</code>';
+    const key = `q:${id}:${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`;
+    if (act === 'reset') { await env.DB.delete(key); return '♻️ Лимиты на сегодня сброшены'; }
+    const q = (await env.DB.get(key, 'json')) || {};
+    const ai = await aiSettings(env); const m = (await getMeta(env, id)) || {};
+    return `🤖 <b>ИИ сегодня</b> (<code>${id}</code>)${m.v ? ' ⭐ VIP' : ''}\n\n${Object.keys(AI_LIMITS).map((k) => `${k}: ${q[k] || 0} / ${(ai.limits[k] || AI_LIMITS[k]) * (m.v ? 3 : 1)}`).join('\n')}`;
+  }],
+  ['blocked', 'mod', '', 'Кто заблокировал бота', async ({ env }) => {
+    const r = (await allUsers(env)).filter((u) => u.m.b);
+    return `🚫 <b>Заблокировали бота: ${r.length}</b>\n\n${r.slice(0, 40).map((u) => userLine(u)).join('\n') || '—'}`;
+  }],
+
+  // ---------- 📣 Рассылки ----------
+  ['broadcast', 'bc', 'текст', 'Рассылка (с выбором аудитории)', null],
+  ['cancel', 'bc', '', 'Остановить рассылку', null],
+  ['bstatus', 'bc', '', 'Ход текущей рассылки', async ({ env }) => {
+    const job = await env.DB.get('bc:job', 'json');
+    const s = await env.DB.get('bc:sched', 'json');
+    return (job ? `📣 Идёт рассылка «${esc(job.seg || 'Всем')}»: ${job.i}/${job.ids.length}\n✅ ${job.ok} · ❌ ${job.fail}` : '💤 Сейчас рассылки нет') +
+      (s ? `\n\n⏰ Отложенная: ${fmtDate(s.at)}` : '');
+  }],
+  ['bhistory', 'bc', '', 'История рассылок', async ({ env }) => {
+    const h = (await env.DB.get('bc:hist', 'json')) || [];
+    return `🗂 <b>Последние рассылки</b>\n\n${h.map((x) => `${fmtDate(x.t)} · ${esc(x.seg)} · ✅${x.ok}/${x.n}${x.fail ? ` ❌${x.fail}` : ''}\n   «${esc(x.txt)}»`).join('\n') || 'Пока не было'}`;
+  }],
+  ['bsegments', 'bc', '', 'Аудитории для рассылки', async ({ env }) => {
+    const users = activeUsers(await allUsers(env)).filter((u) => !isOwner(env, u.id));
+    const now = Date.now();
+    return `🎯 <b>Аудитории</b>\n\n${Object.values(SEGMENTS).map(([t, f]) => `${t}: <b>${users.filter((u) => f(u, now)).length}</b>`).join('\n')}`;
+  }],
+  ['btest', 'bc', 'текст', 'Пробная отправка себе', async ({ env, me, arg, msg }) => {
+    if (msg.reply_to_message) { await tg(env, 'copyMessage', { chat_id: me, from_chat_id: me, message_id: msg.reply_to_message.message_id }); return; }
+    if (!arg) return usage('/btest <b>жирный</b> текст') + '\nили ответьте /btest на сообщение';
+    const r = await send(env, me, arg);
+    if (!r.ok) return `⚠️ Ошибка разметки: ${esc(r.description)}`;
+  }],
+  ['schedule', 'bc', 'ЧЧ:ММ|+мин текст | off', 'Отложенная рассылка всем', async ({ env, me, args, msg }) => {
+    const [when, ...w] = args;
+    if (!when) {
+      const s = await env.DB.get('bc:sched', 'json');
+      return s ? `⏰ Запланирована на ${fmtDate(s.at)}: «${esc(s.draft.text ? s.draft.text.slice(0, 80) : '[медиа]')}»\nОтменить: /schedule off` : usage('/schedule 19:30 текст') + '\nили <code>/schedule +60 текст</code> (через 60 мин)\nили ответьте <code>/schedule 19:30</code> на сообщение';
+    }
+    if (when === 'off') { await env.DB.delete('bc:sched'); return '🗑 Отложенная рассылка отменена'; }
+    let at;
+    if (/^\+\d+$/.test(when)) at = Date.now() + Number(when.slice(1)) * 60000;
+    else if (/^\d{1,2}:\d{2}$/.test(when)) {
+      const [H, M] = when.split(':').map(Number);
+      const [h, m] = kyivHM().split(':').map(Number);
+      let diff = H * 60 + M - (h * 60 + m);
+      if (diff <= 0) diff += 1440;
+      at = Date.now() + diff * 60000;
+    } else return '⚠️ Время: <code>19:30</code> (по Киеву) или <code>+60</code>';
+    const draft = msg.reply_to_message ? { copy: msg.reply_to_message.message_id } : w.length ? { text: w.join(' ') } : null;
+    if (!draft) return '⚠️ Добавьте текст или ответьте командой на сообщение';
+    await env.DB.put('bc:sched', JSON.stringify({ at, draft, from: me }));
+    return `⏰ Рассылка всем запланирована на <b>${fmtDate(at)}</b> (по Киеву).\nОтменить: /schedule off`;
+  }],
+
+  // ---------- 📱 Приложение ----------
+  ['config', 'app', '', 'Текущие настройки приложения', async ({ env }) => {
+    const c = await getCfg(env);
+    const b = c.banner || {}; const m = c.maintenance || {};
+    return `📱 <b>Настройки приложения</b>\n\n` +
+      `Название: <b>${esc(c.title || 'Калории')}</b>\nТема: ${esc(c.theme || 'ice')}\nЯзык для всех: ${c.forceLang || 'выбор пользователя'}\n\n` +
+      `🛠 Тех. работы: ${yes(m.on)}\n📢 Баннер: ${yes(b.on && b.text)}${b.text ? ` (${esc(b.style || 'info')}) «${esc(b.text.slice(0, 60))}»` : ''}\n` +
+      `👋 Приветствие: ${yes(c.welcome !== false)}\n💡 Советы: ${yes(c.tips !== false)}\n🏆 Достижения: ${yes(c.achievements !== false)}\n🎉 Конфетти: ${yes(c.confetti !== false)}\n📋 Копирование приёмов: ${yes(c.copyMeal !== false)}\n\n` +
+      `👨‍💻 Разработчик: ${esc(c.developer || 'Danya. Vas')}\n🧪 Тестировщик: ${esc(c.tester || 'Не указано')}\n⭐ Своих продуктов: ${(c.foods || []).length}`;
+  }],
+  ['maintenance', 'app', 'on|off [текст]', 'Технические работы (заглушка)', async ({ env, args }) => {
+    const [a, ...w] = args; const v = onOff(a);
+    if (v === null && !a) { const m = (await getCfg(env)).maintenance || {}; return `🛠 Тех. работы: ${yes(m.on)}\nТекст: ${esc(m.text || '—')}\n\n${usage('/maintenance on Вернёмся в 18:00')}`; }
+    const text = v === null ? args.join(' ') : w.join(' ');
+    await setCfg(env, (c) => { c.maintenance = { ...(c.maintenance || {}), ...(v === null ? { on: true } : { on: v }), ...(text ? { text: text.slice(0, 300) } : {}) }; });
+    return v === false ? '✅ Тех. работы выключены — приложение снова доступно' : `🛠 Тех. работы <b>включены</b>. Пользователи увидят заглушку в течение минуты.${text ? `\nТекст: ${esc(text)}` : ''}\nВыключить: /maintenance off`;
+  }],
+  ['banner', 'app', 'текст | off', 'Баннер вверху приложения', async ({ env, arg }) => {
+    if (!arg) { const b = (await getCfg(env)).banner || {}; return `📢 Баннер: ${yes(b.on)}\n${esc(b.text || '—')}\n\n${usage('/banner Новая функция — фото еды!')}\nУбрать: /banner off`; }
+    if (onOff(arg) === false) { await setCfg(env, (c) => { c.banner = { ...(c.banner || {}), on: false }; }); return '✅ Баннер скрыт'; }
+    await setCfg(env, (c) => { c.banner = { style: 'info', ...(c.banner || {}), on: true, text: arg.slice(0, 200) }; });
+    return `📢 Баннер включён: «${esc(arg.slice(0, 200))}»\nСтиль: /bannerstyle info|promo|warn`;
+  }],
+  ['bannerstyle', 'app', 'info|promo|warn', 'Цвет баннера', async ({ env, arg }) => {
+    if (!['info', 'promo', 'warn'].includes(arg)) return usage('/bannerstyle promo') + '\ninfo — инфо, promo — акция, warn — важно';
+    await setCfg(env, (c) => { c.banner = { ...(c.banner || {}), style: arg }; });
+    return `✅ Стиль баннера: ${arg}`;
+  }],
+  ['title', 'app', 'название', 'Название в приложении', cfgText('title', '🏷 Название', '/title Калории')],
+  ['theme', 'app', 'ice|ocean|sapphire|sky', 'Цветовая тема для всех', async ({ env, arg }) => {
+    const T2 = { ice: 'Лёд', ocean: 'Океан', sapphire: 'Сапфир', sky: 'Небо' };
+    if (!T2[arg]) return `🎨 Тема: <b>${esc((await getCfg(env)).theme || 'ice')}</b>\n\n${Object.entries(T2).map(([k, v]) => `<code>/theme ${k}</code> — ${v}`).join('\n')}`;
+    await setCfg(env, (c) => { c.theme = arg; });
+    return `🎨 Тема: ${T2[arg]}`;
+  }],
+  ['forcelang', 'app', 'uk|ru|en|off', 'Язык для всех принудительно', async ({ env, arg }) => {
+    if (!BOT_TR[arg] && onOff(arg) !== false) return `🌐 Сейчас: <b>${(await getCfg(env)).forceLang || 'выбор пользователя'}</b>\n\n${usage('/forcelang uk')}\nОтключить: /forcelang off`;
+    const v = BOT_TR[arg] ? arg : '';
+    await setCfg(env, (c) => { c.forceLang = v; });
+    return v ? `🌐 Язык для всех: <b>${v}</b> — и в приложении, и в боте` : '🌐 Пользователи снова выбирают язык сами';
+  }],
+  ['reload', 'app', '', 'Перезапустить приложение у всех', async ({ env }) => {
+    await setCfg(env, (c) => { c.reloadToken = Date.now(); });
+    return '🔄 Команда отправлена: у всех, у кого открыто приложение, оно перезапустится в течение минуты (и подтянет свежую версию).';
+  }],
+  ['welcome', 'app', 'on|off', 'Экран приветствия при входе', cfgToggle('welcome', '👋 Приветствие')],
+  ['welcometext', 'app', 'текст | off', 'Свой текст приветствия', async ({ env, arg }) => {
+    if (!arg) return `👋 Текст: ${esc((await getCfg(env)).welcomeText || 'стандартный')}\n${usage('/welcometext Добро пожаловать!')}`;
+    const v = onOff(arg) === false ? '' : arg.slice(0, 300);
+    await setCfg(env, (c) => { c.welcomeText = v; });
+    return v ? '✅ Текст приветствия обновлён' : '✅ Вернули стандартный текст';
+  }],
+  ['tips', 'app', 'on|off', 'Подсказки «осталось N ккал»', cfgToggle('tips', '💡 Советы')],
+  ['achievements', 'app', 'on|off', 'Достижения', cfgToggle('achievements', '🏆 Достижения')],
+  ['confetti', 'app', 'on|off', 'Конфетти', cfgToggle('confetti', '🎉 Конфетти')],
+  ['copymeal', 'app', 'on|off', 'Копирование приёмов пищи', cfgToggle('copyMeal', '📋 Копирование приёмов')],
+  ['developer', 'app', 'имя', 'Имя разработчика в титрах', cfgText('developer', '👨‍💻 Разработчик', '/developer Danya. Vas')],
+  ['tester', 'app', 'имя', 'Имя тестировщика в титрах', cfgText('tester', '🧪 Тестировщик', '/tester Не указано')],
+  ['botlink', 'app', 'ссылка', 'Ссылка на бота/канал в приложении', cfgText('botLink', '🔗 Ссылка', '/botlink https://t.me/...')],
+  ['backup', 'app', '', 'Скачать настройки файлом', async ({ env, me }) => {
+    const r = await sendFile(env, me, `config_${kyivDay(Date.now())}.json`, JSON.stringify(await getCfg(env), null, 2), '💾 Резервная копия настроек. Восстановить: /restore и текст файла', 'application/json');
+    if (!r.ok) return `⚠️ ${esc(r.description)}`;
+  }],
+  ['restore', 'app', '{json}', 'Восстановить настройки из JSON', async ({ env, arg, msg }) => {
+    const src = arg || (msg.reply_to_message && msg.reply_to_message.text) || '';
+    let c;
+    try { c = JSON.parse(src); } catch { return usage('/restore {"title":"Калории",…}') + '\nили ответьте /restore на сообщение с JSON'; }
+    if (!c || typeof c !== 'object' || Array.isArray(c)) return '⚠️ Нужен JSON-объект';
+    await env.DB.put('config', JSON.stringify(c));
+    return '✅ Настройки восстановлены';
+  }],
+  ['resetconfig', 'app', '', 'Сбросить настройки к заводским', async ({ env, me }) => {
+    await send(env, me, '⚠️ Сбросить все настройки приложения (баннер, тему, свои продукты, тексты)? Сначала можно сделать /backup.', { reply_markup: confirmKb('resetconfig') });
+  }],
+
+  // ---------- 🍎 Продукты ----------
+  ['foods', 'food', '', 'Свои продукты (видны всем)', async ({ env }) => {
+    const f = (await getCfg(env)).foods || [];
+    return `⭐ <b>Свои продукты: ${f.length}</b>\n\n${f.map((x, i) => `${i + 1}. ${esc(x.n)} — ${x.k} ккал · Б${x.p} Ж${x.f} У${x.c}`).join('\n') || '—'}\n\nДобавить: /addfood`;
+  }],
+  ['addfood', 'food', 'Название; ккал; б; ж; у', 'Добавить продукт для всех', async ({ env, arg }) => {
+    const p = arg.split(/[;|]/).map((s) => s.trim());
+    const num = (s) => Math.max(0, Math.round(Number(String(s || '0').replace(',', '.')) * 10) / 10);
+    if (p.length < 2 || !p[0] || !(num(p[1]) > 0)) return usage('/addfood Сырник домашний; 220; 15; 9; 20') + '\n(значения на 100 г)';
+    const f = { n: p[0].slice(0, 60), k: num(p[1]), p: num(p[2]), f: num(p[3]), c: num(p[4]) };
+    const c = await setCfg(env, (x) => { x.foods = [...(x.foods || []), f].slice(-200); });
+    return `✅ Добавлен «${esc(f.n)}» — ${f.k} ккал. Всего своих: ${c.foods.length}`;
+  }],
+  ['delfood', 'food', 'N | all', 'Удалить продукт по номеру', async ({ env, arg }) => {
+    const c = await getCfg(env); const f = c.foods || [];
+    if (arg === 'all') { await setCfg(env, (x) => { x.foods = []; }); return `🗑 Удалено ${f.length}`; }
+    const i = parseInt(arg, 10) - 1;
+    if (!(i >= 0 && i < f.length)) return usage('/delfood 3') + ' (номер из /foods)';
+    const [del] = f.splice(i, 1);
+    await setCfg(env, (x) => { x.foods = f; });
+    return `🗑 Удалён «${esc(del.n)}»`;
+  }],
+
+  // ---------- 🤖 ИИ ----------
+  ['aistatus', 'ai', '', 'Состояние ИИ и лимиты', async ({ env }) => {
+    const ai = await aiSettings(env);
+    return `🤖 <b>ИИ</b>\n\nПривязка Workers AI: ${env.AI ? '✅ есть' : '❌ нет'}\nСостояние: ${ai.off ? '⛔️ выключен владельцем' : '✅ работает'}\n\n<b>Лимиты в день на человека</b>\n${Object.keys(AI_LIMITS).map((k) => `${k}: ${ai.limits[k] || AI_LIMITS[k]}${ai.limits[k] ? ' (изменён)' : ''}`).join('\n')}\n\nVIP — ×3, владелец — ×5`;
+  }],
+  ['aion', 'ai', '', 'Включить ИИ для всех', async ({ env }) => { const ai = await aiSettings(env); ai.off = false; await admSet(env, 'ai', ai); return '✅ ИИ включён'; }],
+  ['aioff', 'ai', '', 'Выключить ИИ для всех', async ({ env }) => { const ai = await aiSettings(env); ai.off = true; await admSet(env, 'ai', ai); return '⛔️ ИИ выключен: фото, голос и чат временно недоступны. Включить: /aion'; }],
+  ['setlimit', 'ai', 'photo|voice|parse|chat N', 'Изменить дневной лимит', async ({ env, args }) => {
+    const [k, n] = args;
+    if (!AI_LIMITS[k] || !(Number(n) >= 0)) return usage('/setlimit photo 25');
+    const ai = await aiSettings(env); ai.limits = { ...ai.limits, [k]: Math.min(1000, Math.round(Number(n))) }; await admSet(env, 'ai', ai);
+    return `✅ Лимит ${k}: ${ai.limits[k]} в день`;
+  }],
+  ['resetlimits', 'ai', '', 'Вернуть стандартные лимиты', async ({ env }) => { const ai = await aiSettings(env); ai.limits = {}; await admSet(env, 'ai', ai); return `♻️ Лимиты по умолчанию: ${Object.entries(AI_LIMITS).map(([k, v]) => `${k} ${v}`).join(', ')}`; }],
+  ['aitest', 'ai', 'текст', 'Проверить разбор еды ИИ', async ({ env, arg }) => {
+    if (!env.AI) return '❌ Привязка AI не подключена';
+    if (!arg) return usage('/aitest два яйца и кофе с молоком');
+    const t = Date.now();
+    const items = await parseFoodText(env, arg);
+    return `🧪 «${esc(arg)}» → ${Date.now() - t} мс\n\n${items.map((x) => `• ${esc(x.name)}${x.count ? ` ×${x.count}` : ''} — ${Math.round(x.grams || 0)} г, ${x.kcal || '?'} ккал/100 г`).join('\n') || 'ничего не распознано'}`;
+  }],
+  ['aiask', 'ai', 'вопрос', 'Задать вопрос ИИ', async ({ env, arg }) => {
+    if (!env.AI) return '❌ Привязка AI не подключена';
+    if (!arg) return usage('/aiask сколько белка в твороге?');
+    const out = await runText(env, [{ role: 'system', content: 'Ты нутрициолог. Отвечай кратко, по-русски.' }, { role: 'user', content: arg.slice(0, 800) }], 500);
+    return `🤖 ${esc(String(out).slice(0, 3500))}`;
+  }],
+
+  // ---------- 💬 Поддержка ----------
+  ['reply', 'sup', 'id текст', 'Написать пользователю', null],
+  ['inbox', 'sup', '[N]', 'Последние сообщения пользователей', async ({ env, arg }) => {
+    const n = Math.min(Math.max(parseInt(arg, 10) || 15, 1), 30);
+    const ib = ((await env.DB.get('ib', 'json')) || []).slice(0, n);
+    return `📥 <b>Входящие</b>\n\n${ib.map((x) => `${fmtDate(x.t)} · ${esc(x.n)} <code>${x.id}</code>\n   ${esc(x.txt)}`).join('\n') || 'Пусто'}`;
+  }],
+  ['support', 'sup', 'on|off', 'Принимать сообщения от пользователей', async ({ env, arg }) => {
+    const s = await admGet(env, 'sup', {}); const v = onOff(arg);
+    if (v === null) return `💬 Приём сообщений: ${yes(!s.off)}\n${usage('/support off')}`;
+    s.off = !v; await admSet(env, 'sup', s);
+    return `💬 Приём сообщений: ${yes(v)}`;
+  }],
+  ['autoreply', 'sup', 'текст | off', 'Автоответ на сообщения', async ({ env, arg }) => {
+    const s = await admGet(env, 'sup', {});
+    if (!arg) return `🤖 Автоответ: ${esc(s.auto || 'стандартный')}\n${usage('/autoreply Спасибо! Отвечу в течение дня')}`;
+    s.auto = onOff(arg) === false ? '' : arg.slice(0, 500); await admSet(env, 'sup', s);
+    return s.auto ? '✅ Автоответ установлен' : '✅ Стандартный автоответ';
+  }],
+  ['hello', 'sup', 'текст | off', 'Своё сообщение на /start', async ({ env, arg }) => {
+    const s = await admGet(env, 'sup', {});
+    if (!arg) return `👋 /start: ${esc(s.hello || 'стандартное (на языке пользователя)')}\n${usage('/hello Привет! Я помогу считать калории')}`;
+    s.hello = onOff(arg) === false ? '' : arg.slice(0, 1500); await admSet(env, 'sup', s);
+    return s.hello ? '✅ Приветствие обновлено' : '✅ Стандартное приветствие';
+  }],
+  ['helptext', 'sup', 'текст | off', 'Свой текст для /help', async ({ env, arg }) => {
+    const s = await admGet(env, 'sup', {});
+    if (!arg) return `ℹ️ /help: ${esc(s.help || 'стандартный')}\n${usage('/helptext Как пользоваться: …')}`;
+    s.help = onOff(arg) === false ? '' : arg.slice(0, 2000); await admSet(env, 'sup', s);
+    return s.help ? '✅ Текст помощи обновлён' : '✅ Стандартный текст помощи';
+  }],
+  ['savetpl', 'sup', 'имя текст', 'Сохранить шаблон ответа', async ({ env, args }) => {
+    const [name, ...w] = args;
+    if (!name || !w.length) return usage('/savetpl спасибо Спасибо за отзыв! 🙌');
+    const t = await admGet(env, 'tpl', {}); t[name.toLowerCase()] = w.join(' ').slice(0, 1000); await admSet(env, 'tpl', t);
+    return `✅ Шаблон «${esc(name)}» сохранён. Отправить: <code>/sendtpl id ${esc(name)}</code>`;
+  }],
+  ['tpls', 'sup', '', 'Шаблоны ответов', async ({ env }) => {
+    const t = await admGet(env, 'tpl', {});
+    return `📑 <b>Шаблоны</b>\n\n${Object.entries(t).map(([k, v]) => `<b>${esc(k)}</b> — ${esc(v.slice(0, 80))}`).join('\n') || 'Пусто. Создать: /savetpl'}`;
+  }],
+  ['deltpl', 'sup', 'имя', 'Удалить шаблон', async ({ env, arg }) => {
+    const t = await admGet(env, 'tpl', {});
+    if (!t[arg.toLowerCase()]) return '🤷 Нет такого шаблона';
+    delete t[arg.toLowerCase()]; await admSet(env, 'tpl', t);
+    return '🗑 Удалён';
+  }],
+  ['sendtpl', 'sup', 'id имя', 'Отправить шаблон пользователю', async ({ env, args }) => {
+    const [id, name] = args;
+    const t = await admGet(env, 'tpl', {});
+    if (!isId(id) || !t[(name || '').toLowerCase()]) return usage('/sendtpl 123456789 спасибо');
+    const r = await send(env, id, t[name.toLowerCase()]);
+    return r.ok ? '✅ Отправлено' : `⚠️ ${esc(r.description)}`;
+  }],
+  ['ask', 'sup', 'id вопрос', 'Спросить пользователя (с кнопкой ответа)', async ({ env, args }) => {
+    const [id, ...w] = args;
+    if (!isId(id) || !w.length) return usage('/ask 123456789 Как вам приложение?');
+    const L = T(await userLang(env, id));
+    const r = await send(env, id, `💬 ${w.join(' ')}\n\n<i>${L === BOT_TR.en ? 'Just reply with a message' : L === BOT_TR.ru ? 'Просто ответьте сообщением' : 'Просто дайте відповідь повідомленням'}</i>`);
+    return r.ok ? '✅ Вопрос отправлен — ответ придёт сюда' : `⚠️ ${esc(r.description)}`;
+  }],
+
+  // ---------- 🤖 Профиль бота ----------
+  ['botinfo', 'bot', '', 'Имя, описание и ссылка бота', async ({ env }) => {
+    const [me, n, d, s] = await Promise.all([tg(env, 'getMe'), tg(env, 'getMyName'), tg(env, 'getMyDescription'), tg(env, 'getMyShortDescription')]);
+    return `🤖 <b>${esc(n.result && n.result.name)}</b> @${esc(me.result && me.result.username)}\nID: <code>${me.result && me.result.id}</code>\n\n<b>Описание:</b>\n${esc(d.result && d.result.description)}\n\n<b>Коротко:</b> ${esc(s.result && s.result.short_description)}`;
+  }],
+  ['setname', 'bot', 'имя', 'Сменить имя бота', async ({ env, arg }) => {
+    if (!arg) return usage('/setname Callories Kaka');
+    const r = await tg(env, 'setMyName', { name: arg.slice(0, 64) });
+    return r.ok ? '✅ Имя бота изменено' : `⚠️ ${esc(r.description)}`;
+  }],
+  ['setdesc', 'bot', 'текст', 'Описание бота (экран «Что умеет бот»)', async ({ env, arg }) => {
+    if (!arg) return usage('/setdesc 🥗 Дневник калорий…');
+    const r = await tg(env, 'setMyDescription', { description: arg.slice(0, 512) });
+    return r.ok ? '✅ Описание обновлено (для украинского/по умолчанию)' : `⚠️ ${esc(r.description)}`;
+  }],
+  ['setshort', 'bot', 'текст', 'Короткое описание (в профиле)', async ({ env, arg }) => {
+    if (!arg) return usage('/setshort Дневник калорий в Telegram 🥗');
+    const r = await tg(env, 'setMyShortDescription', { short_description: arg.slice(0, 120) });
+    return r.ok ? '✅ Короткое описание обновлено' : `⚠️ ${esc(r.description)}`;
+  }],
+  ['setmenu', 'bot', 'текст', 'Надпись на кнопке меню', async ({ env, arg }) => {
+    if (!arg) return usage('/setmenu Відкрити');
+    const r = await tg(env, 'setChatMenuButton', { menu_button: { type: 'web_app', text: arg.slice(0, 32), web_app: { url: appUrl(env) } } });
+    return r.ok ? `✅ Кнопка меню: «${esc(arg.slice(0, 32))}»` : `⚠️ ${esc(r.description)}`;
+  }],
+  ['setup', 'bot', '', 'Перенастроить бота (команды, вебхук)', async ({ env }) => {
+    const w = await tg(env, 'getWebhookInfo');
+    const url = w.result && w.result.url;
+    if (!url) return '⚠️ Вебхук не установлен — откройте /setup?secret=… в браузере';
+    const res = await setup(new URL(new URL(url).origin + '/setup?secret=' + encodeURIComponent(env.WEBHOOK_SECRET || '')), env);
+    return `⚙️ ${esc(await res.text())}`;
+  }],
+
+  // ---------- ⚙️ Система ----------
+  ['ping', 'sys', '', 'Проверка связи и версия', async ({ env }) => {
+    const t = Date.now(); await env.DB.get('config'); const kv = Date.now() - t;
+    const t2 = Date.now(); await tg(env, 'getMe'); const api = Date.now() - t2;
+    return `🏓 Понг! Сервер ${WORKER_VERSION}\nБаза (KV): ${kv} мс\nTelegram API: ${api} мс\nВремя (Киев): ${kyivHM()}`;
+  }],
+  ['health', 'sys', '', 'Полная проверка сервера', async ({ env }) => {
+    const [w, me, cron, cfg, job, ai] = await Promise.all([tg(env, 'getWebhookInfo'), tg(env, 'getMe'), env.DB.get('cron:last'), getCfg(env), env.DB.get('bc:job', 'json'), aiSettings(env)]);
+    const wi = w.result || {};
+    const cronAge = cron ? Date.now() - Number(cron) : null;
+    return `🩺 <b>Проверка</b>\n\n${me.ok ? '✅' : '❌'} Токен бота\n${env.DB ? '✅' : '❌'} База KV\n${env.AI ? '✅' : '❌'} Workers AI${ai.off ? ' (выключен командой)' : ''}\n` +
+      `${wi.url ? '✅' : '❌'} Вебхук${wi.pending_update_count ? ` · в очереди ${wi.pending_update_count}` : ''}\n` +
+      `${wi.last_error_message ? `⚠️ Последняя ошибка вебхука: ${esc(wi.last_error_message)} (${fmtDate(wi.last_error_date * 1000)})\n` : ''}` +
+      `${cronAge !== null && cronAge < 40 * 60000 ? '✅' : '⚠️'} Cron (напоминания): ${cron ? ago(Number(cron)) : 'ещё не отмечался — проверьте Triggers → Cron'}\n` +
+      `${cfg.maintenance && cfg.maintenance.on ? '🛠 Включены тех. работы\n' : ''}${job ? `📣 Идёт рассылка ${job.i}/${job.ids.length}\n` : ''}`;
+  }],
+  ['errors', 'sys', '[clear]', 'Ошибки из приложения (3 дня)', async ({ env, arg }) => {
+    const days = [0, 1, 2].map((i) => `le:${kyivDay(Date.now() - i * DAY)}`);
+    if (arg === 'clear') { for (const k of days) await env.DB.delete(k); return '🧹 Журнал очищен'; }
+    const all = [];
+    for (const k of days) all.push(...((await env.DB.get(k, 'json')) || []));
+    all.sort((a, b) => b.t - a.t);
+    return `🐞 <b>Ошибки: ${all.length}</b>\n\n${all.slice(0, 15).map((e) => `${fmtDate(e.t)}\n<code>${esc(e.m.slice(0, 200))}</code>`).join('\n\n') || 'Ошибок нет 🎉'}\n\nОчистить: /errors clear`;
+  }],
+  ['kv', 'sys', '', 'Что хранится в базе', async ({ env }) => {
+    const keys = await listKeys(env, '', 5);
+    const c = {};
+    for (const k of keys) { const p = k.name.includes(':') ? k.name.split(':')[0] : k.name; c[p] = (c[p] || 0) + 1; }
+    const names = { u: 'пользователи', sm: 'итоги дня', rs: 'настройки напоминаний', rm: 'слоты напоминаний', q: 'лимиты ИИ', ch: 'челленджи', uc: 'мои челленджи', rc: 'счётчики приглашений', nt: 'заметки', us: 'статистика функций', le: 'журнал ошибок', r: 'связи ответов', pv: 'еда из чата', fs: 'голодание', ro: 'разовые напоминания', adm: 'настройки админа', bc: 'рассылки' };
+    return `🗄 <b>База: ${keys.length}${keys.length >= 5000 ? '+' : ''} ключей</b>\n\n${Object.entries(c).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${esc(k)} — ${v}${names[k] ? ` (${names[k]})` : ''}`).join('\n')}`;
+  }],
+  ['cron', 'sys', '', 'Когда последний раз работал cron', async ({ env }) => {
+    const c = await env.DB.get('cron:last');
+    return c ? `⏱ Cron работал ${ago(Number(c))} (${fmtDate(Number(c))}). Отметка ставится раз в 30 мин.` : '⚠️ Cron ещё не отмечался. Проверьте Cloudflare → Worker → Settings → Triggers → Cron <code>* * * * *</code>';
+  }],
+  ['reminders', 'sys', '', 'Сколько людей с напоминаниями', async ({ env }) => {
+    const [rs, rm, fs] = await Promise.all([listKeys(env, 'rs:'), listKeys(env, 'rm:'), listKeys(env, 'fs:')]);
+    return `🔔 <b>Напоминания</b>\n\nПользователей с напоминаниями: <b>${rs.length}</b>\nЗанятых минут в расписании: ${rm.length}\n⏳ Сейчас голодают: ${fs.length}`;
+  }],
+  ['challenges', 'sys', '', 'Активные челленджи', async ({ env }) => {
+    const keys = await listKeys(env, 'ch:');
+    const rows = [];
+    for (const k of keys.slice(0, 20)) { const c = await env.DB.get(k.name, 'json'); if (c) rows.push(`${esc(c.title)} · ${c.days} дн · с ${c.start} · 👥 ${Object.keys(c.members || {}).length}`); }
+    return `🏁 <b>Челленджи: ${keys.length}</b>\n\n${rows.join('\n') || '—'}`;
+  }],
+];
+const WORKER_VERSION = '6.0';
+const ADMIN_MAP = Object.fromEntries(ADMIN_CMDS.map(([c, g, a, d, fn]) => [c, { c, g, a, d, fn }]));
+
+function adminHome(env) {
+  const counts = {};
+  for (const [, g] of ADMIN_CMDS) counts[g] = (counts[g] || 0) + 1;
+  const keys = Object.keys(ADM_GROUPS);
+  const rows = [];
+  for (let i = 0; i < keys.length; i += 2) rows.push(keys.slice(i, i + 2).map((g) => ({ text: `${ADM_GROUPS[g]} · ${counts[g] || 0}`, callback_data: 'adm:' + g })));
+  rows.push([{ text: '📜 Все команды списком', callback_data: 'adm:all' }]);
+  rows.push([{ text: '🥗 Открыть приложение', web_app: { url: appUrl(env) } }]);
+  return {
+    text: `🛠 <b>Панель владельца</b>\n\nКоманд: <b>${ADMIN_CMDS.length}</b>. Выберите раздел — покажу команды с подсказками.\n\n` +
+      `Быстро: /stats · /today · /health · /inbox\n💬 Сообщения пользователей приходят сюда — отвечайте на них реплаем.`,
+    kb: { inline_keyboard: rows },
+  };
+}
+function adminGroupText(g) {
+  const list = ADMIN_CMDS.filter((x) => x[1] === g);
+  return `${ADM_GROUPS[g]}\n\n${list.map(([c, , a, d]) => `/${c}${a ? ` <i>${esc(a)}</i>` : ''}\n   ${esc(d)}`).join('\n')}`;
+}
+
+async function adminCommand(env, msg, cmd, arg) {
+  const ent = ADMIN_MAP[cmd.slice(1)];
+  if (!ent || !ent.fn) return false;
+  const me = msg.chat.id;
+  try {
+    const out = await ent.fn({ env, me, arg, args: arg.split(/\s+/).filter(Boolean), msg });
+    if (out) await sendLong(env, me, out);
+  } catch (e) {
+    console.log('admin cmd error', cmd, e && e.stack);
+    await send(env, me, `⚠️ Ошибка в ${esc(cmd)}: ${esc(e && e.message)}`);
+  }
+  return true;
+}
+
+async function adminCallback(q, env) {
+  const me = q.from.id;
+  const edit = (text, kb) => tg(env, 'editMessageText', { chat_id: me, message_id: q.message.message_id, text, parse_mode: 'HTML', disable_web_page_preview: true, ...(kb ? { reply_markup: kb } : {}) });
+  const [kind, a, p] = q.data.split(':');
+  if (kind === 'adm') {
+    if (a === 'home') { const h = adminHome(env); await edit(h.text, h.kb); }
+    else if (a === 'all') { await sendLong(env, me, Object.keys(ADM_GROUPS).map(adminGroupText).join('\n\n')); }
+    else if (ADM_GROUPS[a]) await edit(adminGroupText(a), { inline_keyboard: [[{ text: '‹ Назад к разделам', callback_data: 'adm:home' }]] });
+  } else if (kind === 'cf') {
+    if (a === 'no') await edit('✖️ Отменено');
+    else if (a === 'resetconfig') { await env.DB.delete('config'); await edit('♻️ Настройки сброшены к заводским'); }
+    else if (a === 'forget' && isId(p)) {
+      await Promise.all([`u:${p}`, `nt:${p}`, `sm:${p}`, `rc:${p}`, `uc:${p}`].map((k) => env.DB.delete(k)));
+      await edit(`🗑 Пользователь <code>${p}</code> удалён из базы бота`);
+    }
+  }
+  return tg(env, 'answerCallbackQuery', { callback_query_id: q.id });
+}
