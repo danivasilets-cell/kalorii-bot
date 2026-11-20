@@ -1090,7 +1090,7 @@ function showWelcome() {
 }
 
 // ---------- Глобальные настройки (меняются владельцем в скрытой панели) ----------
-const APP_VERSION = '5.4';
+const APP_VERSION = '5.5';
 const DEFAULT_CONFIG = {
   title: 'Калории',
   theme: 'ice',

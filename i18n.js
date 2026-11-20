@@ -8,6 +8,7 @@ const LANGS = [['uk', 'Українська', '🇺🇦'], ['ru', 'Русски�
 let LANG = (() => { try { return localStorage.getItem('kal_lang') || 'uk'; } catch { return 'uk'; } })();
 
 const UI_TR_RAW = `
+Нет записей|Немає записів|No entries
 Дневник|Щоденник|Diary
 Статистика|Статистика|Stats
 Питание|Харчування|Food

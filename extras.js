@@ -347,37 +347,74 @@ async function weekCard() {
   const days = await loadDays(7);
   const logged = days.filter((d) => d.t.k > 0);
   const g = goals(S.profile);
-  const W = 1080, H = 1350, c = document.createElement('canvas');
+  try { await Promise.race([Promise.all(['700 54px Unbounded', '600 28px Unbounded'].map((f) => document.fonts.load(f))), new Promise((r) => setTimeout(r, 1500))]); } catch {}
+  const W = 1080, H = 1350, PAD = 80, c = document.createElement('canvas');
   c.width = W; c.height = H;
   const x = c.getContext('2d');
+  // Старые WebView без roundRect — рисуем обычный прямоугольник.
+  const rr = (rx, ry, rw, rh, rad) => { x.beginPath(); if (x.roundRect) x.roundRect(rx, ry, rw, rh, rad); else x.rect(rx, ry, rw, rh); x.fill(); };
+  const T = (s) => tr(s);
+  const font = (w, sz) => `${w} ${sz}px Unbounded, Manrope, -apple-system, sans-serif`;
+  /** Пишет текст, уменьшая шрифт, пока он не поместится в maxW. */
+  const fitText = (text, tx, ty, maxW, weight, size, min = 16) => {
+    let sz = size;
+    x.font = font(weight, sz);
+    while (x.measureText(text).width > maxW && sz > min) { sz -= 1; x.font = font(weight, sz); }
+    x.fillText(text, tx, ty, maxW);
+    return sz;
+  };
+  /** Подпись в 1–2 строки внутри плитки. */
+  const fitLabel = (text, tx, ty, maxW, size) => {
+    x.font = font(600, size);
+    if (x.measureText(text).width <= maxW) return x.fillText(text, tx, ty);
+    const words = text.split(' ');
+    let best = null;
+    for (let i = 1; i < words.length; i++) {
+      const l1 = words.slice(0, i).join(' '), l2 = words.slice(i).join(' ');
+      const w = Math.max(x.measureText(l1).width, x.measureText(l2).width);
+      if (!best || w < best.w) best = { l1, l2, w };
+    }
+    if (!best) return fitText(text, tx, ty, maxW, 600, size, 14);
+    let sz = size;
+    while (best.w > maxW && sz > 16) { sz -= 1; x.font = font(600, sz); best.w = Math.max(x.measureText(best.l1).width, x.measureText(best.l2).width); }
+    x.fillText(best.l1, tx, ty - sz * 0.55, maxW);
+    x.fillText(best.l2, tx, ty + sz * 0.6, maxW);
+  };
   const bg = x.createLinearGradient(0, 0, W, H); bg.addColorStop(0, '#1638c8'); bg.addColorStop(0.55, '#0d1f6e'); bg.addColorStop(1, '#071338');
   x.fillStyle = bg; x.fillRect(0, 0, W, H);
   const orb = (cx, cy, r, col) => { const gr = x.createRadialGradient(cx, cy, 0, cx, cy, r); gr.addColorStop(0, col); gr.addColorStop(1, 'rgba(0,0,0,0)'); x.fillStyle = gr; x.fillRect(0, 0, W, H); };
   orb(900, 120, 520, 'rgba(63,212,255,.55)'); orb(80, 700, 480, 'rgba(43,91,255,.5)');
-  const T = (s) => tr(s);
-  const font = (w, s) => `${w} ${s}px Unbounded, Manrope, -apple-system, sans-serif`;
-  x.fillStyle = '#fff'; x.font = font(700, 44); x.fillText(CFG.title || 'Калории', 80, 130);
-  x.globalAlpha = 0.75; x.font = font(600, 34); x.fillText(T(`Моя неделя · ${dateText(days[0].date)} — ${dateText(days[6].date)}`), 80, 190); x.globalAlpha = 1;
-  x.font = font(700, 170); x.fillText(n0(avg(logged.map((d) => d.t.k))), 80, 420);
-  x.font = font(600, 40); x.globalAlpha = 0.8; x.fillText(T(`ккал в день в среднем · норма ${n0(g.kcal)}`), 84, 480); x.globalAlpha = 1;
+  const inner = W - PAD * 2;
+  x.fillStyle = '#fff'; fitText(T(CFG.title || 'Калории'), PAD, 130, inner, 700, 44);
+  x.globalAlpha = 0.75; fitText(T(`Моя неделя · ${dateText(days[0].date)} — ${dateText(days[6].date)}`), PAD, 190, inner, 600, 34); x.globalAlpha = 1;
+  if (logged.length) fitText(n0(avg(logged.map((d) => d.t.k))), PAD, 420, inner, 700, 170, 60); else fitText(T('Нет записей'), PAD, 400, inner, 700, 90, 40);
+  x.globalAlpha = 0.8; fitText(logged.length ? T(`ккал в день в среднем · норма ${n0(g.kcal)}`) : `${T('Норма')} ${n0(g.kcal)} ${T('ккал')}`, PAD + 4, 480, inner, 600, 40); x.globalAlpha = 1;
   // столбики
   const max = Math.max(g.kcal * 1.2, ...days.map((d) => d.t.k));
+  const gap = 30, bw = (inner - gap * 6) / 7;
   days.forEach((d, i) => {
-    const bw = 100, gap = 30, bx = 80 + i * (bw + gap), bh = (d.t.k / max) * 300, by = 880 - bh;
-    x.fillStyle = 'rgba(255,255,255,.14)'; x.beginPath(); x.roundRect(bx, 580, bw, 300, 22); x.fill();
+    const bx = PAD + i * (bw + gap), bh = (d.t.k / max) * 300, by = 880 - bh;
+    x.fillStyle = 'rgba(255,255,255,.14)'; rr(bx, 580, bw, 300, 22);
     const gr = x.createLinearGradient(0, by, 0, 880); gr.addColorStop(0, '#8de3ff'); gr.addColorStop(1, '#2a74f5');
-    x.fillStyle = d.t.k > g.kcal * 1.1 ? '#ffb547' : gr; if (bh > 0) { x.beginPath(); x.roundRect(bx, by, bw, bh, 22); x.fill(); }
-    x.fillStyle = 'rgba(255,255,255,.75)'; x.font = font(600, 30); x.textAlign = 'center'; x.fillText(T(['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'][d.date.getDay()]), bx + bw / 2, 930); x.textAlign = 'left';
+    x.fillStyle = d.t.k > g.kcal * 1.1 ? '#ffb547' : gr; if (bh > 1) rr(bx, by, bw, bh, Math.min(22, bh / 2));
+    x.fillStyle = 'rgba(255,255,255,.75)'; x.textAlign = 'center'; fitText(T(['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'][d.date.getDay()]), bx + bw / 2, 930, bw, 600, 30); x.textAlign = 'left';
   });
   const ws = S.weights.filter(([iso]) => parseIso(iso) >= addDays(days[0].date, -3));
-  const tiles = [[`🔥 ${streak()}`, plural(streak(), 'день подряд', 'дня подряд', 'дней подряд')], [`${logged.length}/7`, 'дней с записями'], [ws.length >= 2 ? `${ws[ws.length - 1][1] - ws[0][1] > 0 ? '+' : ''}${n1(ws[ws.length - 1][1] - ws[0][1])} кг` : `${n0(avg(days.filter((d) => d.w).map((d) => d.w)))} мл`, ws.length >= 2 ? 'вес за неделю' : 'воды в день']];
+  const water = days.filter((d) => d.w);
+  const tiles = [
+    [`🔥 ${streak()}`, plural(streak(), 'день подряд', 'дня подряд', 'дней подряд')],
+    [`${logged.length}/7`, 'дней с записями'],
+    ws.length >= 2 ? [`${ws[ws.length - 1][1] - ws[0][1] > 0 ? '+' : ''}${n1(ws[ws.length - 1][1] - ws[0][1])} ${T('кг')}`, 'вес за неделю']
+      : [water.length ? `${n0(avg(water.map((d) => d.w)))} ${T('мл')}` : '—', 'воды в день'],
+  ];
+  const tgap = 30, tw = (inner - tgap * 2) / 3, tpad = 28;
   tiles.forEach(([v, l], i) => {
-    const tx = 80 + i * 320;
-    x.fillStyle = 'rgba(255,255,255,.12)'; x.beginPath(); x.roundRect(tx, 1010, 290, 200, 36); x.fill();
-    x.fillStyle = '#fff'; x.font = font(700, 54); x.fillText(v, tx + 32, 1100);
-    x.globalAlpha = 0.75; x.font = font(600, 28); x.fillText(T(l), tx + 32, 1160); x.globalAlpha = 1;
+    const tx = PAD + i * (tw + tgap);
+    x.fillStyle = 'rgba(255,255,255,.12)'; rr(tx, 1010, tw, 210, 36);
+    x.fillStyle = '#fff'; fitText(v, tx + tpad, 1098, tw - tpad * 2, 700, 54, 24);
+    x.globalAlpha = 0.75; fitLabel(T(l), tx + tpad, 1165, tw - tpad * 2, 28); x.globalAlpha = 1;
   });
-  x.globalAlpha = 0.6; x.font = font(600, 28); x.fillText(T('Дневник питания в Telegram'), 80, 1290); x.globalAlpha = 1;
+  x.globalAlpha = 0.6; fitText(T('Дневник питания в Telegram'), PAD, 1300, inner, 600, 28); x.globalAlpha = 1;
   return c.toDataURL('image/png');
 }
 function weekCardSheet() {
