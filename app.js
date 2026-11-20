@@ -873,7 +873,7 @@ function showWelcome() {
 }
 
 // ---------- Глобальные настройки (меняются владельцем в скрытой панели) ----------
-const APP_VERSION = '3.0';
+const APP_VERSION = '3.1';
 const DEFAULT_CONFIG = {
   title: 'Калории',
   theme: 'ice',
@@ -904,20 +904,43 @@ function applyConfig() {
   document.documentElement.dataset.accent = CFG.theme || 'ice';
   document.title = CFG.title || 'Калории';
 }
-async function refreshConfig() {
-  if (!API_URL) return;
+/** Загружает настройки с сервера. Возвращает true, если они изменились. */
+async function loadServerConfig(timeout = 4000) {
+  if (!API_URL) return false;
   try {
     const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), 4000);
-    const r = await fetch(API_URL + '/api/config', { signal: ctrl.signal });
-    if (!r.ok) return;
+    const timer = setTimeout(() => ctrl.abort(), timeout);
+    const r = await fetch(`${API_URL}/api/config?t=${Date.now()}`, { signal: ctrl.signal, cache: 'no-store' });
+    clearTimeout(timer);
+    if (!r.ok) return false;
     const text = JSON.stringify(await r.json());
-    if (text === lsGet('kal_cfg_cache')) return;
+    if (text === lsGet('kal_cfg_cache')) return false;
     lsSet('kal_cfg_cache', text);
     CFG = mergeConfig(JSON.parse(text));
     applyConfig();
-    if (!sheets.length) render();
-  } catch {}
+    return true;
+  } catch { return false; }
+}
+/** Применяет свежие настройки к уже открытому приложению (в т.ч. включает/выключает заглушку). */
+async function refreshConfig() {
+  if (!(await loadServerConfig())) return;
+  const blocked = CFG.maintenance.on && !isAdmin();
+  if (blocked) { closeAllSheets(); return showMaintenance(); }
+  if (document.querySelector('.maint')) { render(); return; }
+  if (!sheets.length) render();
+}
+/** Диагностика для панели владельца. */
+async function checkServer() {
+  if (!API_URL) return 'Адрес сервера не задан в приложении.';
+  try {
+    const r = await fetch(`${API_URL}/api/config?t=${Date.now()}`, { cache: 'no-store' });
+    const text = await r.text();
+    let j;
+    try { j = JSON.parse(text); } catch { return `Сервер отвечает (${r.status}), но это старая версия кода воркера. Обновите код в Cloudflare (Edit code → вставить заново → Deploy).`; }
+    const keys = Object.keys(j);
+    if (!keys.length) return '✅ Сервер работает. Настройки ещё ни разу не сохранялись — нажмите «Сохранить для всех».';
+    return `✅ Сервер работает. На сервере сохранено: тех. работы — ${j.maintenance && j.maintenance.on ? 'ВКЛ' : 'выкл'}, баннер — ${j.banner && j.banner.on ? 'ВКЛ' : 'выкл'}, тема — ${j.theme || 'ice'}, своих продуктов — ${(j.foods || []).length}.`;
+  } catch (e) { return 'Не удалось связаться с сервером: ' + (e && e.message ? e.message : 'ошибка сети'); }
 }
 async function saveConfig(next) {
   if (!API_URL) {
@@ -1014,6 +1037,8 @@ function adminSheet() {
         <div class="row-flat"><span>Сервер</span><b class="${API_URL ? 'ok' : 'warn'}">${API_URL ? '● подключён' : '● не подключён'}</b></div>
         <div class="row-flat"><span>Ваш Telegram ID</span><b>${u ? u.id : '—'}</b></div>
         <div class="row-flat"><span>Версия</span><b>${APP_VERSION}</b></div>
+        ${st.check ? `<p class="hint">${esc(st.check)}</p>` : ''}
+        ${API_URL ? '<button class="btn ghost" style="margin:10px 0 0" data-a="checkSrv">Проверить сервер</button>' : ''}
         ${pendingLocal ? '<p class="hint">Загружены настройки, сохранённые на этом телефоне до подключения сервера. Нажмите «Сохранить для всех» внизу.</p>' : ''}
         ${API_URL ? '' : '<p class="hint">Без сервера настройки сохраняются только на этом устройстве. Пришлите адрес Cloudflare-воркера — и они будут применяться у всех.</p>'}
       </div>
@@ -1107,6 +1132,7 @@ function adminSheet() {
         haptic(); refreshSheet();
       },
       loadStats,
+      async checkSrv() { st.check = 'Проверяем…'; refreshSheet(); st.check = await checkServer(); refreshSheet(); },
       addFood() {
         const f = st.food;
         const k = num(f.k) || num(f.p) * 4 + num(f.f) * 9 + num(f.c) * 4;
@@ -1120,7 +1146,7 @@ function adminSheet() {
         st.saving = true; st.msg = ''; refreshSheet();
         const r = await saveConfig(draft);
         st.saving = false;
-        st.msg = r.ok ? (r.local ? '✅ Сохранено на этом устройстве' : '✅ Сохранено — изменения увидят все пользователи') : '⚠️ ' + (r.error || 'Ошибка');
+        st.msg = r.ok ? (r.local ? '✅ Сохранено на этом устройстве' : `✅ Сохранено на сервере — пользователи увидят изменения при открытии приложения${draft.maintenance.on ? '. Заглушку вы не видите, потому что вы владелец.' : ''}`) : '⚠️ ' + (r.error || 'Ошибка');
         if (r.ok) { haptic('success'); applyConfig(); render(); }
         refreshSheet();
       },
@@ -1308,11 +1334,14 @@ async function init() {
   const stripKeys = Array.from({ length: 21 }, (_, i) => dayKey(addDays(startOfDay(new Date()), -i))).filter((k) => S.daySet.has(k));
   const stripVals = await Store.get(stripKeys);
   for (const k of stripKeys) S.strip.set(k, totalsOf(parse(stripVals[k], { e: [] }).e || []).k);
-  await loadDay(new Date());
+  // Свежие настройки с сервера (не дольше 2,5 с) — чтобы заглушка и баннер работали сразу.
+  await Promise.all([loadDay(new Date()), loadServerConfig(2500)]);
   if (CFG.maintenance.on && !isAdmin()) return showMaintenance();
   render();
   if (CFG.welcome || !S.profile.onboarded) showWelcome();
-  refreshConfig();
+  // Повторная проверка при возвращении в приложение и раз в минуту.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshConfig(); });
+  setInterval(refreshConfig, 60000);
   if (API_URL && inTelegram) fetch(API_URL + '/api/open', { method: 'POST', body: tg.initData }).catch(() => {});
 }
 
