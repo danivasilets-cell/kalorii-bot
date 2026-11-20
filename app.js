@@ -9,7 +9,7 @@
 const tg = window.Telegram && window.Telegram.WebApp;
 const inTelegram = !!(tg && tg.initData);
 // Адрес бота на Cloudflare (для статистики владельца). Пусто — не отправлять.
-const API_URL = '';
+const API_URL = 'https://kalorii-bot.danilvasilec10.workers.dev';
 const cloud = inTelegram && tg.isVersionAtLeast && tg.isVersionAtLeast('6.9') ? tg.CloudStorage : null;
 
 // ---------- Утилиты ----------
@@ -929,7 +929,7 @@ async function saveConfig(next) {
   try {
     const r = await fetch(API_URL + '/api/config', { method: 'POST', body: JSON.stringify({ initData: tg.initData, config: next }) });
     const j = await r.json();
-    if (j.ok) { lsSet('kal_cfg_cache', JSON.stringify(next)); CFG = mergeConfig(next); }
+    if (j.ok) { lsSet('kal_cfg_cache', JSON.stringify(next)); CFG = mergeConfig(next); try { localStorage.removeItem('kal_cfg_local'); } catch {} }
     return j;
   } catch { return { ok: false, error: 'Нет связи с сервером' }; }
 }
@@ -991,7 +991,9 @@ function pinSheet() {
 }
 
 function adminSheet() {
-  const draft = JSON.parse(JSON.stringify(CFG));
+  // Настройки, сохранённые до подключения сервера, подтягиваем в черновик, чтобы отправить их всем.
+  const pendingLocal = API_URL ? parse(lsGet('kal_cfg_local'), null) : null;
+  const draft = JSON.parse(JSON.stringify(pendingLocal ? mergeConfig(pendingLocal) : CFG));
   const st = { stats: null, statsLoading: false, saving: false, msg: '', food: { n: '', k: '', p: '', f: '', c: '' }, importText: '' };
   const u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
   const sw = (key, label, sub) => {
@@ -1012,6 +1014,7 @@ function adminSheet() {
         <div class="row-flat"><span>Сервер</span><b class="${API_URL ? 'ok' : 'warn'}">${API_URL ? '● подключён' : '● не подключён'}</b></div>
         <div class="row-flat"><span>Ваш Telegram ID</span><b>${u ? u.id : '—'}</b></div>
         <div class="row-flat"><span>Версия</span><b>${APP_VERSION}</b></div>
+        ${pendingLocal ? '<p class="hint">Загружены настройки, сохранённые на этом телефоне до подключения сервера. Нажмите «Сохранить для всех» внизу.</p>' : ''}
         ${API_URL ? '' : '<p class="hint">Без сервера настройки сохраняются только на этом устройстве. Пришлите адрес Cloudflare-воркера — и они будут применяться у всех.</p>'}
       </div>
 
