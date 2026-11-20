@@ -1173,6 +1173,7 @@ function checkForcedReload() {
 }
 /** Автообновление: если на сайте вышла новая версия, а Telegram показывает старую из кэша — перезагружаемся с обходом кэша. */
 async function checkAppVersion() {
+  if (!/^https?:$/.test(location.protocol)) return false;
   try {
     const r = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return false;
