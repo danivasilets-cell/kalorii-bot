@@ -141,6 +141,7 @@ const S = {
   prev: { e: [], w: 0 }, // предыдущий день — для «как вчера»
   daySet: new Set(), // дни, в которые есть записи
   ach: {}, // полученные достижения
+  strip: new Map(), // калории по дням для ленты дат
 };
 
 // Еда: { n: название, b: бренд, k/p/f/c: на 100 г, s: порция, g: граммы, m: приём пищи, bc: штрихкод }
@@ -150,7 +151,7 @@ function totalsOf(entries) {
 }
 const foodSub = (f) => [f.b, `${n0(f.k)} ккал · Б ${n1(f.p)} Ж ${n1(f.f)} У ${n1(f.c)} на 100 г`].filter(Boolean).join(' · ');
 const foodKey = (f) => `${f.n.toLowerCase()}|${(f.b || '').toLowerCase()}`;
-const plainFood = (f) => ({ n: f.n, b: f.b || undefined, k: +f.k, p: +f.p, f: +f.f, c: +f.c, s: f.s || undefined, bc: f.bc || undefined });
+const plainFood = (f) => ({ n: f.n, b: f.b || undefined, k: +f.k, p: +f.p, f: +f.f, c: +f.c, s: f.s || undefined, bc: f.bc || undefined, cat: f.cat != null ? f.cat : undefined });
 
 async function loadDay(d) {
   S.day = startOfDay(d);
@@ -163,6 +164,7 @@ async function saveDay() {
   const key = dayKey(S.day);
   if (!S.data.e.length && !S.data.w) { S.daySet.delete(key); await Store.remove(key); }
   else { S.daySet.add(key); await Store.set(key, JSON.stringify(S.data)); }
+  S.strip.set(key, totalsOf(S.data.e).k);
   S.history = null;
   await checkAchievements();
 }
@@ -218,7 +220,7 @@ function renderSheet() {
     return;
   }
   const back = top.noBack ? '' : `<button class="link-btn" data-a="back">${sheets.length > 1 ? '‹ Назад' : 'Закрыть'}</button>`;
-  host.innerHTML = `<div class="sheet">
+  host.innerHTML = `<div class="sheet-backdrop" ${top.noBack ? '' : 'data-a="back"'}></div><div class="sheet ${top.compact ? 'compact' : ''}"><div class="grabber"></div>
     <div class="sheet-head"><div class="side">${back}</div><h2>${esc(top.title)}</h2><div class="side">${top.headRight ? top.headRight() : ''}</div></div>
     <div class="sheet-body">${top.render()}</div></div>`;
   try { top.noBack ? tg.BackButton.hide() : tg.BackButton.show(); } catch {}
@@ -239,7 +241,7 @@ function totalsHTML(t) {
     <div><b style="color:var(--carb)">${n1(t.c)}</b><span>углеводы</span></div></div>`;
 }
 function foodRow(f, action, extra = '') {
-  return `<button class="row" data-a="${action}" ${extra}><div class="main"><div class="title">${esc(f.n)}</div><div class="sub">${esc(foodSub(f))}</div></div></button>`;
+  return `<button class="row" data-a="${action}" ${extra}><div class="fic">${f.star ? '⭐' : catEmoji(f)}</div><div class="main"><div class="title">${esc(f.n)}</div><div class="sub">${esc(foodSub(f))}</div></div></button>`;
 }
 function mealSeg(current) {
   return `<div class="seg">${MEALS.map((m) => `<button data-a="meal" data-m="${m.id}" class="${m.id === current ? 'on' : ''}">${m.t}</button>`).join('')}</div>`;
@@ -253,9 +255,14 @@ function renderDiary() {
   const pct = Math.min(t.k / Math.max(g.kcal, 1), 1);
   const C = 2 * Math.PI * 52;
   const isToday = sameDay(S.day, startOfDay(new Date()));
-  const macro = (label, v, goal, color) => `<div class="macro"><div class="label"><i style="background:${color}"></i>${label}</div>
-    <div class="bar"><i style="width:${Math.min(v / Math.max(goal, 1), 1) * 100}%;background:${v > goal * 1.1 ? '#fff' : color}"></i></div>
-    <div class="nums">${n0(v)} / ${n0(goal)} г</div></div>`;
+  const macro = (label, v, goal, color) => {
+    const r = 21, Cm = 2 * Math.PI * r, k = Math.min(v / Math.max(goal, 1), 1);
+    return `<div class="macro">
+      <div class="mring"><svg viewBox="0 0 54 54"><circle cx="27" cy="27" r="${r}" fill="none" stroke="rgba(255,255,255,.2)" stroke-width="6"/>
+        <circle cx="27" cy="27" r="${r}" fill="none" stroke="${color}" stroke-width="6" stroke-linecap="round" stroke-dasharray="${Cm}" stroke-dashoffset="${Cm * (1 - k)}" style="transition:stroke-dashoffset .8s"/></svg>
+        <b>${Math.round((v / Math.max(goal, 1)) * 100)}%</b></div>
+      <div class="label">${label}</div><div class="nums">${n0(v)} / ${n0(goal)} г</div></div>`;
+  };
 
   const cupsTotal = Math.min(16, Math.max(4, Math.round(g.water / 250)));
   const cupsOn = Math.round(S.data.w / 250);
@@ -271,19 +278,31 @@ function renderDiary() {
         ${items.map(({ e, i }) => { const x = per(e, e.g); return `<button class="row" data-a="edit" data-i="${i}">
           <div class="main"><div class="title">${esc(e.n)}</div><div class="sub">${n0(e.g)} г · Б ${n1(x.p)} · Ж ${n1(x.f)} · У ${n1(x.c)}</div></div>
           <div class="val">${n0(x.k)}</div></button>`; }).join('')}
-        ${!items.length && prevItems.length ? `<button class="row copy" data-a="copyMeal" data-m="${m.id}"><span class="plus soft">↺</span>Как вчера · ${prevItems.length} ${plural(prevItems.length, 'продукт', 'продукта', 'продуктов')}, ${n0(totalsOf(prevItems).k)} ккал</button>` : ''}
+        ${CFG.copyMeal && !items.length && prevItems.length ? `<button class="row copy" data-a="copyMeal" data-m="${m.id}"><span class="plus soft">↺</span>Как вчера · ${prevItems.length} ${plural(prevItems.length, 'продукт', 'продукта', 'продуктов')}, ${n0(totalsOf(prevItems).k)} ккал</button>` : ''}
         <button class="row add" data-a="add" data-m="${m.id}"><span class="plus">+</span>Добавить</button>
       </div>`;
   }).join('');
 
   const st = streak();
   const subtitle = cap(isToday ? `${WEEKDAYS[S.day.getDay()]}, ${dateText(S.day)}` : WEEKDAYS[S.day.getDay()]);
+  const today = startOfDay(new Date());
+  const strip = Array.from({ length: 21 }, (_, i) => addDays(today, i - 20)).map((d) => {
+    const key = dayKey(d), sel = sameDay(d, S.day);
+    const k = sel ? t.k : S.strip.get(key) || 0;
+    const r = 15, Cd = 2 * Math.PI * r, q = Math.min(k / Math.max(g.kcal, 1), 1);
+    return `<button class="dchip ${sel ? 'on' : ''} ${sameDay(d, today) ? 'now' : ''}" data-a="pickDay" data-d="${isoDate(d)}">
+      <span>${['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'][d.getDay()]}</span>
+      <svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="${r}" fill="none" class="tr" stroke-width="3"/>
+        ${k ? `<circle cx="18" cy="18" r="${r}" fill="none" class="pr ${k > g.kcal * 1.1 ? 'over' : ''}" stroke-width="3" stroke-linecap="round" stroke-dasharray="${Cd}" stroke-dashoffset="${Cd * (1 - q)}" transform="rotate(-90 18 18)"/>` : ''}
+        <text x="18" y="22.5" text-anchor="middle">${d.getDate()}</text></svg></button>`;
+  }).join('');
+  const banner = CFG.banner.on && CFG.banner.text ? `<div class="banner ${esc(CFG.banner.style)}">${esc(CFG.banner.text)}</div>` : '';
   return `<div class="top">
       <h1><span class="sub-title">${subtitle}</span>${dayTitle(S.day)}</h1>
       ${isToday ? `<button class="streak-chip ${st ? '' : 'off'}" data-a="streakInfo">🔥 ${st}</button>` : '<button class="pill-btn" data-a="today">Сегодня</button>'}
-      <button class="icon-btn" data-a="prevDay" aria-label="Предыдущий день">‹</button>
-      <button class="icon-btn" data-a="nextDay" aria-label="Следующий день" ${isToday ? 'disabled' : ''}>›</button>
     </div>
+    <div class="strip" id="strip">${strip}</div>
+    ${banner}
     <div class="hero">
       <div class="summary">
         <div class="ring">
@@ -311,7 +330,7 @@ function renderDiary() {
       </div>
       <div class="cups">${cups}</div>
     </div>
-    ${isToday ? `<div class="card tip"><div class="ic">💡</div><div><b>Совет дня</b><p>${esc(tipOfDay())}</p></div></div>` : ''}
+    ${isToday && CFG.tips ? `<div class="card tip"><div class="ic">💡</div><div><b>Совет дня</b><p>${esc(tipOfDay())}</p></div></div>` : ''}
     ${meals}`;
 }
 
@@ -465,10 +484,11 @@ function renderProfile() {
       <div><b>${bestStreak()}</b><span>рекорд, дней</span></div>
       <div><b>${S.daySet.size}</b><span>дней в дневнике</span></div>
     </div>
-    <div class="section-h"><span>Достижения</span><span>${got} из ${ACH.length}</span></div>
-    <div class="card"><div class="badges">${ACH.map((a) => `<button class="badge-item ${S.ach[a.id] ? 'on' : ''}" data-a="badge" data-id="${a.id}"><div class="medal">${a.i}</div><span>${a.t}</span></button>`).join('')}</div></div>
+    ${CFG.achievements ? `<div class="section-h"><span>Достижения</span><span>${got} из ${ACH.length}</span></div>
+    <div class="card"><div class="badges">${ACH.map((a) => `<button class="badge-item ${S.ach[a.id] ? 'on' : ''}" data-a="badge" data-id="${a.id}"><div class="medal">${a.i}</div><span>${a.t}</span></button>`).join('')}</div></div>` : ''}
     ${profileFormHTML(S.profile)}
-    <div class="footnote">Записи хранятся в вашем облаке Telegram и видны только вам. База продуктов — Open Food Facts (ODbL).</div>`;
+    <div class="footnote">Записи хранятся в вашем облаке Telegram и видны только вам. База продуктов — встроенная (${BUILTIN.length}) и Open Food Facts (ODbL).</div>
+    <div class="version" data-a="secret">${esc(CFG.title)} · версия ${APP_VERSION}${isAdmin() ? ' · <span data-a="openAdmin">🛠 панель</span>' : ''}</div>`;
 }
 function onboardingSheet() {
   return {
@@ -484,28 +504,45 @@ function onboardingSheet() {
 
 // ---------- Добавление еды ----------
 function addFoodSheet(meal) {
-  const st = { q: '', results: null, loading: false, error: null, searched: '' };
+  const st = { q: '', results: null, loading: false, error: null, searched: '', cat: null };
+  const norm = (t) => t.toLowerCase().replace(/ё/g, 'е');
+  const featured = () => (CFG.foods || []).map((f) => ({ ...f, star: true }));
   const local = () => {
-    const words = st.q.toLowerCase().split(/\s+/).filter(Boolean);
+    const q = norm(st.q.trim());
+    const words = q.split(/\s+/).filter(Boolean);
     if (!words.length) return [];
     const seen = new Set();
-    return [...S.custom, ...S.recent, ...BUILTIN].filter((f) => {
-      const hay = (f.n + ' ' + (f.b || '')).toLowerCase();
-      return words.every((w) => hay.includes(w)) && !seen.has(foodKey(f)) && seen.add(foodKey(f));
-    }).slice(0, 30);
+    const scored = [];
+    for (const f of [...featured(), ...S.custom, ...S.recent, ...BUILTIN]) {
+      const name = norm(f.n), hay = name + ' ' + norm(f.b || '');
+      if (!words.every((w) => hay.includes(w)) || seen.has(foodKey(f))) continue;
+      seen.add(foodKey(f));
+      const score = name.startsWith(q) ? 0 : name.split(/[\s(,-]+/).some((w) => w.startsWith(words[0])) ? 1 : 2;
+      scored.push([score, name.length, f]);
+    }
+    return scored.sort((a, b) => a[0] - b[0] || a[1] - b[1]).slice(0, 60).map((x) => x[2]);
   };
   let pool = [];
   const row = (f) => { pool.push(f); return foodRow(f, 'pick', `data-i="${pool.length - 1}"`); };
   const results = () => {
     pool = [];
     const q = st.q.trim();
+    if (!q && st.cat != null) {
+      const c = CATEGORIES[st.cat];
+      return `<button class="pill-btn" data-a="catBack" style="margin-bottom:12px">‹ Все категории</button>
+        <div class="section-h"><span>${c.emoji} ${c.name}</span><span>${c.count}</span></div>
+        <div class="list">${BUILTIN.filter((f) => f.cat === st.cat).map(row).join('')}</div>`;
+    }
     if (!q) {
+      const fe = featured();
       return `<div class="quick">
           <button data-a="barcode"><span>🔢</span>По штрихкоду<small>цифры с упаковки</small></button>
           <button data-a="manual"><span>✍️</span>Свой продукт<small>КБЖУ с этикетки</small></button></div>
+        ${fe.length ? `<div class="section-h"><span>⭐ Рекомендуем</span></div><div class="list">${fe.map(row).join('')}</div>` : ''}
+        ${S.recent.length ? `<div class="section-h"><span>Недавние</span></div><div class="list">${S.recent.slice(0, 12).map(row).join('')}</div>` : ''}
         ${S.custom.length ? `<div class="section-h"><span>Мои продукты</span></div><div class="list">${S.custom.map(row).join('')}</div>` : ''}
-        ${S.recent.length ? `<div class="section-h"><span>Недавние</span></div><div class="list">${S.recent.map(row).join('')}</div>` : ''}
-        <div class="section-h"><span>Базовые продукты</span></div><div class="list">${BUILTIN.map(row).join('')}</div>`;
+        <div class="section-h"><span>Каталог</span><span>${BUILTIN.length} продуктов</span></div>
+        <div class="cats">${CATEGORIES.map((c) => `<button data-a="cat" data-c="${c.id}"><span>${c.emoji}</span><b>${c.name}</b><small>${c.count}</small></button>`).join('')}</div>`;
     }
     const loc = local();
     let online;
@@ -513,8 +550,8 @@ function addFoodSheet(meal) {
     else if (st.error) online = `<div class="row"><div class="main" style="color:var(--hint)">${esc(st.error)}</div></div><button class="row add" data-a="search">Повторить</button>`;
     else if (st.results && st.searched === q) online = st.results.length ? st.results.map(row).join('') : `<div class="row"><div class="main" style="color:var(--hint)">Ничего не нашлось</div></div>`;
     else online = `<button class="row add" data-a="search"><span class="plus">🔍</span>Искать «${esc(q)}» в интернете</button>`;
-    return `${loc.length ? `<div class="section-h"><span>Найдено</span></div><div class="list">${loc.map(row).join('')}</div>` : ''}
-      <div class="section-h"><span>Open Food Facts</span></div><div class="list">${online}</div>
+    return `${loc.length ? `<div class="section-h"><span>Найдено</span><span>${loc.length}</span></div><div class="list">${loc.map(row).join('')}</div>` : ''}
+      ${CFG.online ? `<div class="section-h"><span>🌐 Интернет-база</span></div><div class="list">${online}</div>` : ''}
       <div class="list"><button class="row add" data-a="manual"><span class="plus">✍️</span>Создать «${esc(q)}» вручную</button></div>`;
   };
   const update = () => { const el = document.getElementById('foodResults'); if (el) el.innerHTML = results(); };
@@ -540,6 +577,8 @@ function addFoodSheet(meal) {
       pick(d) { openSheet(amountSheet(pool[+d.i], meal)); },
       search,
       barcode() { openSheet(barcodeSheet(meal)); },
+      cat(d) { st.cat = +d.c; update(); document.querySelector('#sheets .sheet').scrollTo(0, 0); },
+      catBack() { st.cat = null; update(); },
       manual() { openSheet(manualSheet(meal, { n: st.q.trim() })); },
     },
   };
@@ -754,6 +793,7 @@ const ACH = [
   { id: 'loyal', i: '💎', t: 'Постоянство', d: 'Вести дневник 14 дней', ok: () => S.daySet.size >= 14 },
 ];
 async function checkAchievements() {
+  if (!CFG.achievements) return;
   const fresh = ACH.filter((a) => !S.ach[a.id] && a.ok());
   if (!fresh.length) return;
   fresh.forEach((a) => { S.ach[a.id] = Date.now(); });
@@ -765,6 +805,7 @@ async function checkAchievements() {
 }
 
 function celebrate() {
+  if (!CFG.confetti) return;
   const c = $('#confetti');
   const ctx = c.getContext('2d');
   const W = innerWidth, H = innerHeight, dpr = devicePixelRatio || 1;
@@ -815,19 +856,312 @@ function showWelcome() {
   const first = !S.profile.onboarded;
   const delay = (s) => `style="animation-delay:${s}s"`;
   el.innerHTML = `<div class="orb a"></div><div class="orb b"></div>
-    <div class="w-logo up">${LOGO}Калории</div>
+    <div class="w-logo up">${LOGO}${esc(CFG.title)}</div>
     <div class="w-greet up" ${delay(0.05)}>${greet} ${emoji}</div>
     <div class="w-name up" ${delay(0.12)}>${esc(name)}</div>
     <div class="w-date up" ${delay(0.18)}>${cap(WEEKDAYS[d.getDay()])}, ${dateText(d)}</div>
+    ${CFG.welcomeText ? `<div class="w-custom up" ${delay(0.22)}>${esc(CFG.welcomeText)}</div>` : ''}
     ${first
       ? `<div class="w-tip up" ${delay(0.26)}><b>Добро пожаловать</b>Посчитаем вашу норму калорий и БЖУ — это меньше минуты. Дальше просто добавляйте еду.</div>`
       : `<div class="w-stats up" ${delay(0.26)}>
           <div><b>${st ? '🔥 ' + st : '—'}</b><span>${st ? plural(st, 'день', 'дня', 'дней') + ' подряд' : 'начните серию'}</span></div>
           <div><b>${n0(Math.max(0, g.kcal - t.k))}</b><span>ккал осталось</span></div>
-          <div><b>${Object.keys(S.ach).length}/${ACH.length}</b><span>достижений</span></div></div>
-        <div class="w-tip up" ${delay(0.34)}><b>💡 Совет дня</b>${esc(tipOfDay())}</div>`}
+          ${CFG.achievements ? `<div><b>${Object.keys(S.ach).length}/${ACH.length}</b><span>достижений</span></div>` : `<div><b>${n0(S.data.w)}</b><span>мл воды</span></div>`}</div>
+        ${CFG.tips ? `<div class="w-tip up" ${delay(0.34)}><b>💡 Совет дня</b>${esc(tipOfDay())}</div>` : ''}`}
     <button class="btn up" ${delay(0.42)} data-a="closeWelcome">${first ? 'Начать' : 'Открыть дневник'}</button>`;
   el.hidden = false;
+}
+
+// ---------- Глобальные настройки (меняются владельцем в скрытой панели) ----------
+const APP_VERSION = '3.0';
+const DEFAULT_CONFIG = {
+  title: 'Калории',
+  theme: 'ice',
+  welcome: true,
+  welcomeText: '',
+  tips: true,
+  achievements: true,
+  confetti: true,
+  copyMeal: true,
+  online: true,
+  banner: { on: false, text: '', style: 'info' },
+  maintenance: { on: false, text: 'Скоро вернёмся — идут технические работы 🛠' },
+  foods: [],
+};
+const THEMES = [
+  { id: 'ice', t: 'Лёд', c: 'linear-gradient(135deg,#2563ff,#1fc3ee)' },
+  { id: 'ocean', t: 'Океан', c: 'linear-gradient(135deg,#0b5ed7,#00b4a6)' },
+  { id: 'sapphire', t: 'Сапфир', c: 'linear-gradient(135deg,#3b2fd9,#3d8bff)' },
+  { id: 'sky', t: 'Небо', c: 'linear-gradient(135deg,#4aa8ff,#8fd8ff)' },
+];
+const mergeConfig = (c) => ({ ...DEFAULT_CONFIG, ...(c || {}), banner: { ...DEFAULT_CONFIG.banner, ...((c && c.banner) || {}) }, maintenance: { ...DEFAULT_CONFIG.maintenance, ...((c && c.maintenance) || {}) } });
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+let CFG = mergeConfig(parse(lsGet(API_URL ? 'kal_cfg_cache' : 'kal_cfg_local'), {}));
+const isAdmin = () => lsGet('kal_admin') === '1';
+
+function applyConfig() {
+  document.documentElement.dataset.accent = CFG.theme || 'ice';
+  document.title = CFG.title || 'Калории';
+}
+async function refreshConfig() {
+  if (!API_URL) return;
+  try {
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 4000);
+    const r = await fetch(API_URL + '/api/config', { signal: ctrl.signal });
+    if (!r.ok) return;
+    const text = JSON.stringify(await r.json());
+    if (text === lsGet('kal_cfg_cache')) return;
+    lsSet('kal_cfg_cache', text);
+    CFG = mergeConfig(JSON.parse(text));
+    applyConfig();
+    if (!sheets.length) render();
+  } catch {}
+}
+async function saveConfig(next) {
+  if (!API_URL) {
+    lsSet('kal_cfg_local', JSON.stringify(next));
+    CFG = mergeConfig(next);
+    return { ok: true, local: true };
+  }
+  if (!inTelegram) return { ok: false, error: 'Сохранять можно только из Telegram' };
+  try {
+    const r = await fetch(API_URL + '/api/config', { method: 'POST', body: JSON.stringify({ initData: tg.initData, config: next }) });
+    const j = await r.json();
+    if (j.ok) { lsSet('kal_cfg_cache', JSON.stringify(next)); CFG = mergeConfig(next); }
+    return j;
+  } catch { return { ok: false, error: 'Нет связи с сервером' }; }
+}
+async function fetchStats() {
+  if (!API_URL || !inTelegram) return null;
+  try {
+    const r = await fetch(API_URL + '/api/stats', { method: 'POST', body: JSON.stringify({ initData: tg.initData }) });
+    return await r.json();
+  } catch { return { ok: false, error: 'Нет связи с сервером' }; }
+}
+
+// ---------- Секретный вход: 10 нажатий на версию + PIN ----------
+let secretTaps = 0, secretTimer;
+function secretTap() {
+  secretTaps++;
+  clearTimeout(secretTimer);
+  secretTimer = setTimeout(() => { secretTaps = 0; }, 2500);
+  if (secretTaps >= 5 && secretTaps < 10) haptic();
+  if (secretTaps >= 10) {
+    secretTaps = 0;
+    haptic('success');
+    openSheet(pinSheet());
+  }
+}
+function pinSheet() {
+  const st = { pin: '', err: false };
+  const PIN = '777777';
+  const dots = () => Array.from({ length: 6 }, (_, i) => `<i class="${i < st.pin.length ? 'on' : ''}"></i>`).join('');
+  const press = (k) => {
+    if (k === 'del') st.pin = st.pin.slice(0, -1);
+    else if (st.pin.length < 6) st.pin += k;
+    st.err = false;
+    haptic();
+    if (st.pin.length === 6) {
+      if (st.pin === PIN) {
+        lsSet('kal_admin', '1');
+        haptic('success');
+        sheets.pop();
+        openSheet(adminSheet());
+        return;
+      }
+      st.err = true;
+      st.pin = '';
+      try { tg.HapticFeedback.notificationOccurred('error'); } catch {}
+    }
+    refreshSheet();
+  };
+  return {
+    title: 'Доступ владельца',
+    render: () => `<div class="pin">
+        <div class="pin-lock">🔐</div>
+        <p>Введите код доступа</p>
+        <div class="pin-dots ${st.err ? 'shake' : ''}">${dots()}</div>
+        <div class="pin-err">${st.err ? 'Неверный код' : ''}</div>
+        <div class="pin-pad">${['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'del'].map((k) => k ? `<button data-a="pinKey" data-k="${k}">${k === 'del' ? '⌫' : k}</button>` : '<span></span>').join('')}</div>
+      </div>`,
+    actions: { pinKey: (d) => press(d.k) },
+  };
+}
+
+function adminSheet() {
+  const draft = JSON.parse(JSON.stringify(CFG));
+  const st = { stats: null, statsLoading: false, saving: false, msg: '', food: { n: '', k: '', p: '', f: '', c: '' }, importText: '' };
+  const u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+  const sw = (key, label, sub) => {
+    const val = key.split('.').reduce((o, k) => o[k], draft);
+    return `<button class="row" data-a="toggle" data-k="${key}"><div class="main"><div class="title">${label}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div><span class="switch ${val ? 'on' : ''}"><i></i></span></button>`;
+  };
+  const loadStats = async () => {
+    st.statsLoading = true; refreshSheet();
+    st.stats = await fetchStats();
+    st.statsLoading = false; refreshSheet();
+  };
+  return {
+    title: '🛠 Владелец',
+    render: () => {
+      const s = st.stats;
+      return `
+      <div class="card admin-status">
+        <div class="row-flat"><span>Сервер</span><b class="${API_URL ? 'ok' : 'warn'}">${API_URL ? '● подключён' : '● не подключён'}</b></div>
+        <div class="row-flat"><span>Ваш Telegram ID</span><b>${u ? u.id : '—'}</b></div>
+        <div class="row-flat"><span>Версия</span><b>${APP_VERSION}</b></div>
+        ${API_URL ? '' : '<p class="hint">Без сервера настройки сохраняются только на этом устройстве. Пришлите адрес Cloudflare-воркера — и они будут применяться у всех.</p>'}
+      </div>
+
+      <div class="section-h"><span>📊 Статистика</span></div>
+      <div class="card">
+        ${!API_URL ? '<p class="hint" style="margin:0">Доступна после подключения сервера.</p>'
+          : st.statsLoading ? '<div class="spinner" style="margin:6px auto"></div>'
+          : s && s.ok ? `<div class="stats3 in">
+              <div><b>${s.total}</b><span>всего</span></div><div><b>${s.new24}</b><span>новых за 24ч</span></div><div><b>${s.active24}</b><span>активных 24ч</span></div>
+              <div><b>${s.new7}</b><span>новых за 7д</span></div><div><b>${s.appUsers}</b><span>открывали app</span></div><div><b>${s.opens}</b><span>открытий</span></div></div>
+              ${(s.latest || []).map((x) => `<div class="row-flat"><span>${esc(x.n || 'Без имени')}${x.u ? ' @' + esc(x.u) : ''}</span><b>📱${x.o}</b></div>`).join('')}`
+          : `<p class="hint" style="margin:0 0 10px">${s ? esc(s.error || 'Ошибка') : 'Нажмите, чтобы загрузить'}</p><button class="btn ghost" data-a="loadStats">Загрузить статистику</button>`}
+      </div>
+
+      <div class="section-h"><span>📣 Объявление для всех</span></div>
+      <div class="list">
+        ${sw('banner.on', 'Показывать баннер', 'Появится вверху дневника у всех пользователей')}
+        <div class="field"><textarea data-cfg="banner.text" rows="3" placeholder="Например: Добавили 600 продуктов! 🎉">${esc(draft.banner.text)}</textarea></div>
+        <div class="field"><div class="seg">${[['info', 'Инфо'], ['promo', 'Акция'], ['warn', 'Важно']].map(([v, t]) => `<button data-a="cfgSet" data-k="banner.style" data-v="${v}" class="${draft.banner.style === v ? 'on' : ''}">${t}</button>`).join('')}</div></div>
+      </div>
+
+      <div class="section-h"><span>🎨 Оформление</span></div>
+      <div class="card"><div class="themes">${THEMES.map((t) => `<button class="theme-dot ${draft.theme === t.id ? 'on' : ''}" data-a="cfgSet" data-k="theme" data-v="${t.id}"><i style="background:${t.c}"></i>${t.t}</button>`).join('')}</div></div>
+      <div class="list">
+        <div class="field"><label>Название</label><input class="wide" style="text-align:right" data-cfg="title" value="${esc(draft.title)}" maxlength="24"></div>
+        <div class="field"><textarea data-cfg="welcomeText" rows="2" placeholder="Своя фраза на экране приветствия (необязательно)">${esc(draft.welcomeText)}</textarea></div>
+      </div>
+
+      <div class="section-h"><span>⚙️ Функции</span></div>
+      <div class="list">
+        ${sw('welcome', 'Экран приветствия', 'При каждом открытии')}
+        ${sw('tips', 'Совет дня')}
+        ${sw('achievements', 'Достижения')}
+        ${sw('confetti', 'Конфетти')}
+        ${sw('copyMeal', '«Как вчера»', 'Повтор вчерашнего приёма пищи')}
+        ${sw('online', 'Поиск в интернете', 'База Open Food Facts')}
+      </div>
+
+      <div class="section-h"><span>⭐ Свои продукты для всех</span><span>${draft.foods.length}</span></div>
+      <div class="list">
+        ${draft.foods.map((f, i) => `<div class="row"><div class="fic">⭐</div><div class="main"><div class="title">${esc(f.n)}</div><div class="sub">${n0(f.k)} ккал · Б ${n1(f.p)} Ж ${n1(f.f)} У ${n1(f.c)}</div></div><button class="link-btn" style="color:var(--danger)" data-a="delFood" data-i="${i}">✕</button></div>`).join('')}
+        <div class="field"><input class="wide" data-food="n" placeholder="Название продукта или блюда" value="${esc(st.food.n)}"></div>
+        <div class="field mini4">${[['k', 'ккал'], ['p', 'Б'], ['f', 'Ж'], ['c', 'У']].map(([k, t]) => `<input data-food="${k}" inputmode="decimal" placeholder="${t}" value="${esc(st.food[k])}">`).join('')}</div>
+        <button class="row add" data-a="addFood"><span class="plus">+</span>Добавить в общую базу</button>
+      </div>
+
+      <div class="section-h"><span>🚧 Тех. работы</span></div>
+      <div class="list">
+        ${sw('maintenance.on', 'Режим обслуживания', 'Пользователи увидят заглушку. Вы — нет.')}
+        <div class="field"><textarea data-cfg="maintenance.text" rows="2">${esc(draft.maintenance.text)}</textarea></div>
+      </div>
+
+      ${st.msg ? `<div class="card admin-msg">${esc(st.msg)}</div>` : ''}
+      <button class="btn" data-a="saveCfg" ${st.saving ? 'disabled' : ''}>${st.saving ? 'Сохраняем…' : API_URL ? 'Сохранить для всех' : 'Сохранить'}</button>
+
+      <div class="section-h"><span>🧰 Инструменты (мои данные)</span></div>
+      <div class="list">
+        <button class="row" data-a="exportData"><div class="fic">📤</div><div class="main"><div class="title">Экспорт данных</div><div class="sub">Скопировать все записи в буфер</div></div></button>
+        <div class="field"><textarea data-imp rows="2" placeholder="Вставьте экспорт сюда для импорта">${esc(st.importText)}</textarea></div>
+        <button class="row" data-a="importData"><div class="fic">📥</div><div class="main"><div class="title">Импорт данных</div></div></button>
+        <button class="row" data-a="demoData"><div class="fic">🧪</div><div class="main"><div class="title">Заполнить демо-данными</div><div class="sub">2 недели записей для проверки графиков</div></div></button>
+        <button class="row" data-a="resetAch"><div class="fic">🏆</div><div class="main"><div class="title">Сбросить достижения</div></div></button>
+        <button class="row" data-a="wipe"><div class="fic">🗑</div><div class="main"><div class="title" style="color:var(--danger)">Удалить все мои данные</div></div></button>
+        <button class="row" data-a="logoutAdmin"><div class="fic">🔒</div><div class="main"><div class="title">Выйти из режима владельца</div></div></button>
+      </div>`;
+    },
+    mount(el) {
+      el.querySelectorAll('[data-cfg]').forEach((inp) => inp.addEventListener('input', () => {
+        const path = inp.dataset.cfg.split('.');
+        const last = path.pop();
+        path.reduce((o, k) => o[k], draft)[last] = inp.value;
+      }));
+      el.querySelectorAll('[data-food]').forEach((inp) => inp.addEventListener('input', () => { st.food[inp.dataset.food] = inp.value; }));
+      const imp = el.querySelector('[data-imp]');
+      if (imp) imp.addEventListener('input', () => { st.importText = imp.value; });
+    },
+    actions: {
+      toggle(d) {
+        const path = d.k.split('.');
+        const last = path.pop();
+        const o = path.reduce((x, k) => x[k], draft);
+        o[last] = !o[last];
+        haptic(); refreshSheet();
+      },
+      cfgSet(d) {
+        const path = d.k.split('.');
+        const last = path.pop();
+        path.reduce((x, k) => x[k], draft)[last] = d.v;
+        if (d.k === 'theme') document.documentElement.dataset.accent = d.v;
+        haptic(); refreshSheet();
+      },
+      loadStats,
+      addFood() {
+        const f = st.food;
+        const k = num(f.k) || num(f.p) * 4 + num(f.f) * 9 + num(f.c) * 4;
+        if (!f.n.trim() || k <= 0) return toast('Нужно название и калории');
+        draft.foods.push({ n: f.n.trim(), k, p: num(f.p), f: num(f.f), c: num(f.c) });
+        st.food = { n: '', k: '', p: '', f: '', c: '' };
+        haptic('success'); refreshSheet();
+      },
+      delFood(d) { draft.foods.splice(+d.i, 1); refreshSheet(); },
+      async saveCfg() {
+        st.saving = true; st.msg = ''; refreshSheet();
+        const r = await saveConfig(draft);
+        st.saving = false;
+        st.msg = r.ok ? (r.local ? '✅ Сохранено на этом устройстве' : '✅ Сохранено — изменения увидят все пользователи') : '⚠️ ' + (r.error || 'Ошибка');
+        if (r.ok) { haptic('success'); applyConfig(); render(); }
+        refreshSheet();
+      },
+      async exportData() {
+        const keys = await Store.keys();
+        const vals = await Store.get(keys);
+        const text = JSON.stringify(vals);
+        try { await navigator.clipboard.writeText(text); toast(`Скопировано: ${keys.length} записей`); }
+        catch { st.importText = text; refreshSheet(); toast('Скопируйте текст из поля импорта'); }
+      },
+      async importData() {
+        const data = parse(st.importText, null);
+        if (!data || typeof data !== 'object') return toast('Неверный формат');
+        for (const [k, v] of Object.entries(data)) if (v) await Store.set(k, v);
+        toast('Импортировано — перезапуск…');
+        setTimeout(() => location.reload(), 800);
+      },
+      async demoData() {
+        const today = startOfDay(new Date());
+        for (let i = 1; i <= 14; i++) {
+          const d = addDays(today, -i);
+          const pick = (n) => BUILTIN.find((f) => f.n === n);
+          const e = [['Овсянка на молоке', 250, 'b'], ['Банан', 120, 'b'], ['Гречка с мясом', 300, 'l'], ['Салат Греческий', 150, 'l'], ['Куриная грудка запечённая', 180, 'd'], ['Рис басмати варёный', 150, 'd'], ['Йогурт греческий 2%', 150, 's']]
+            .map(([n, g, m], j) => ({ ...plainFood(pick(n)), g: Math.round(g * (0.7 + Math.random() * 0.6)), m, t: d.getTime() + 8 * 3600e3 + j * 3600e3 }));
+          await Store.set(dayKey(d), JSON.stringify({ e, w: 250 * (4 + Math.floor(Math.random() * 5)) }));
+          S.daySet.add(dayKey(d));
+        }
+        toast('Готово — перезапуск…');
+        setTimeout(() => location.reload(), 800);
+      },
+      async resetAch() { S.ach = {}; await Store.set('ach', '{}'); toast('Достижения сброшены'); },
+      async wipe() {
+        const ok = await new Promise((res) => {
+          try { tg.showConfirm('Удалить ВСЕ ваши записи, вес и профиль? Это необратимо.', res); }
+          catch { res(window.confirm('Удалить ВСЕ ваши записи, вес и профиль?')); }
+        });
+        if (!ok) return;
+        for (const k of await Store.keys()) await Store.remove(k);
+        toast('Данные удалены');
+        setTimeout(() => location.reload(), 800);
+      },
+      logoutAdmin() { try { localStorage.removeItem('kal_admin'); } catch {} closeAllSheets(); toast('Режим владельца выключен'); },
+    },
+  };
 }
 
 // ---------- Вкладки и общий рендер ----------
@@ -843,7 +1177,11 @@ function render() {
   $('#app').innerHTML = views[S.tab]();
   const tab = ([id, t]) => `<button class="tab ${S.tab === id ? 'on' : ''}" data-a="tab" data-t="${id}"><svg viewBox="0 0 24 24">${TAB_ICONS[id]}</svg>${t}</button>`;
   $('#tabs').innerHTML = TABS.slice(0, 2).map(tab).join('') + '<button class="fab" data-a="quickAdd" aria-label="Добавить еду">+</button>' + TABS.slice(2).map(tab).join('');
-  if (S.tab === 'diary') animateCounts();
+  if (S.tab === 'diary') {
+    animateCounts();
+    const strip = $('#strip'), on = strip && strip.querySelector('.on');
+    if (on) strip.scrollLeft = on.offsetLeft - strip.clientWidth / 2 + on.clientWidth / 2;
+  }
   S.popCup = false;
 }
 
@@ -870,6 +1208,9 @@ const actions = {
   async waterPlus() { await setWater(S.data.w + 250); },
   async waterSet(d) { const n = +d.n; const cur = Math.round(S.data.w / 250); await setWater((cur === n ? n - 1 : n) * 250); },
   async waterMinus() { await setWater(Math.max(0, S.data.w - 250)); },
+  async pickDay(d) { haptic(); await loadDay(parseIso(d.d)); render(); },
+  secret() { secretTap(); },
+  openAdmin(d, el) { secretTaps = 0; openSheet(adminSheet()); },
   quickAdd() { openSheet(addFoodSheet(suggestedMeal())); },
   streakInfo() { const st = streak(); toast(st ? `🔥 ${st} ${plural(st, 'день', 'дня', 'дней')} подряд · рекорд ${bestStreak()}` : 'Добавьте еду сегодня — начнётся серия 🔥'); },
   badge(d) { const a = ACH.find((x) => x.id === d.id); toast(`${a.i} ${a.t}: ${a.d}${S.ach[a.id] ? ' ✓' : ''}`); },
@@ -946,6 +1287,7 @@ document.addEventListener('change', async (ev) => {
 // ---------- Запуск ----------
 async function init() {
   applyTheme();
+  applyConfig();
   if (tg) {
     try { tg.onEvent('themeChanged', applyTheme); } catch {}
     try { tg.ready(); tg.expand(); } catch {}
@@ -960,10 +1302,21 @@ async function init() {
   S.recent = parse(v.recent, []);
   S.custom = parse(v.custom, []);
   S.weights = parse(v.weights, []);
+  const stripKeys = Array.from({ length: 21 }, (_, i) => dayKey(addDays(startOfDay(new Date()), -i))).filter((k) => S.daySet.has(k));
+  const stripVals = await Store.get(stripKeys);
+  for (const k of stripKeys) S.strip.set(k, totalsOf(parse(stripVals[k], { e: [] }).e || []).k);
   await loadDay(new Date());
+  if (CFG.maintenance.on && !isAdmin()) return showMaintenance();
   render();
-  showWelcome();
+  if (CFG.welcome || !S.profile.onboarded) showWelcome();
+  refreshConfig();
   if (API_URL && inTelegram) fetch(API_URL + '/api/open', { method: 'POST', body: tg.initData }).catch(() => {});
+}
+
+function showMaintenance() {
+  $('#tabs').innerHTML = '';
+  $('#app').innerHTML = `<div class="maint"><div class="logo-big">${LOGO}</div><h2>${esc(CFG.title)}</h2><p>${esc(CFG.maintenance.text)}</p>
+    <div class="version" data-a="secret">версия ${APP_VERSION}</div></div>`;
 }
 
 function applyTheme() {

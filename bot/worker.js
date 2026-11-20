@@ -21,10 +21,11 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
 
-    if (url.pathname === '/api/open') {
-      if (req.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
-      if (req.method === 'POST') return cors(await apiOpen(req, env));
-    }
+    if (url.pathname.startsWith('/api/') && req.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
+    if (url.pathname === '/api/open' && req.method === 'POST') return cors(await apiOpen(req, env));
+    if (url.pathname === '/api/config' && req.method === 'GET') return cors(json((await env.DB.get('config', 'json')) || {}));
+    if (url.pathname === '/api/config' && req.method === 'POST') return cors(await apiSaveConfig(req, env));
+    if (url.pathname === '/api/stats' && req.method === 'POST') return cors(await apiStats(req, env));
 
     if (url.pathname === '/setup') return setup(url, env);
 
@@ -317,6 +318,47 @@ async function apiOpen(req, env) {
   if (!user) return new Response('bad init data', { status: 401 });
   await touchUser(env, user, { open: true });
   return new Response('ok');
+}
+
+const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
+
+/** Проверяет, что запрос пришёл из мини-приложения от владельца бота. */
+async function ownerFromBody(req, env) {
+  let body;
+  try { body = JSON.parse(await req.text()); } catch { return { error: json({ ok: false, error: 'bad json' }, 400) }; }
+  const user = await verifyInitData(body.initData, env.BOT_TOKEN);
+  if (!user) return { error: json({ ok: false, error: 'Откройте приложение из Telegram' }, 401) };
+  if (!isOwner(env, user.id)) return { error: json({ ok: false, error: 'Только владелец бота может менять настройки' }, 403) };
+  return { body, user };
+}
+
+async function apiSaveConfig(req, env) {
+  const { error, body } = await ownerFromBody(req, env);
+  if (error) return error;
+  const text = JSON.stringify(body.config || {});
+  if (text.length > 60000) return json({ ok: false, error: 'Слишком большой конфиг' }, 413);
+  await env.DB.put('config', text);
+  return json({ ok: true });
+}
+
+async function apiStats(req, env) {
+  const { error } = await ownerFromBody(req, env);
+  if (error) return error;
+  const users = await allUsers(env);
+  const now = Date.now(), day = 86400e3;
+  const c = (f) => users.filter(f).length;
+  return json({
+    ok: true,
+    total: users.length,
+    new24: c((u) => now - (u.m.j || 0) < day),
+    new7: c((u) => now - (u.m.j || 0) < 7 * day),
+    active24: c((u) => now - (u.m.s || 0) < day),
+    active7: c((u) => now - (u.m.s || 0) < 7 * day),
+    appUsers: c((u) => (u.m.o || 0) > 0),
+    opens: users.reduce((s, u) => s + (u.m.o || 0), 0),
+    blocked: c((u) => u.m.b),
+    latest: users.sort((a, b) => (b.m.j || 0) - (a.m.j || 0)).slice(0, 10).map((u) => ({ id: u.id, n: u.m.n, u: u.m.u, j: u.m.j, o: u.m.o || 0 })),
+  });
 }
 
 async function verifyInitData(initData, token) {
