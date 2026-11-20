@@ -1090,7 +1090,7 @@ function showWelcome() {
 }
 
 // ---------- Глобальные настройки (меняются владельцем в скрытой панели) ----------
-const APP_VERSION = '5.5';
+const APP_VERSION = '5.6';
 const DEFAULT_CONFIG = {
   title: 'Калории',
   theme: 'ice',
@@ -1171,9 +1171,23 @@ function checkForcedReload() {
   }, 900);
   return true;
 }
+/** Автообновление: если на сайте вышла новая версия, а Telegram показывает старую из кэша — перезагружаемся с обходом кэша. */
+async function checkAppVersion() {
+  try {
+    const r = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return false;
+    const v = String((await r.json()).v || '');
+    const u = new URL(location.href);
+    if (!v || v === APP_VERSION || u.searchParams.get('v') === v) return false;
+    u.searchParams.set('v', v);
+    location.replace(u.toString());
+    return true;
+  } catch { return false; }
+}
 async function refreshConfig() {
   if (!(await loadServerConfig())) return;
   if (checkForcedReload()) return;
+  if (await checkAppVersion()) return;
   applyForcedLang();
   const blocked = CFG.maintenance.on && !isAdmin();
   if (blocked) { closeAllSheets(); return showMaintenance(); }
@@ -1671,6 +1685,7 @@ async function init() {
   // Свежие настройки с сервера (не дольше 2,5 с) — чтобы заглушка и баннер работали сразу.
   await Promise.all([loadDay(new Date()), loadServerConfig(2500)]);
   checkForcedReload();
+  checkAppVersion();
   if (applyForcedLang()) saveProfile();
   if (CFG.maintenance.on && !isAdmin()) return showMaintenance();
   render();
