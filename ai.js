@@ -290,6 +290,7 @@ async function aiContext() {
   } catch {}
   const p = S.profile;
   return {
+    language: { uk: 'украинский', ru: 'русский', en: 'английский' }[LANG],
     now: new Date().toLocaleString('ru-RU', { weekday: 'long', hour: '2-digit', minute: '2-digit' }),
     profile: { sex: p.sex === 'm' ? 'мужской' : 'женский', age: p.age, height: p.height, weight: p.weight, goal: (GOALS.find((x) => x.id === p.goal) || {}).t, activity: (ACTIVITY.find((x) => x.id === p.activity) || {}).t },
     norm: { kcal: g.kcal, protein: g.protein, fat: g.fat, carbs: g.carbs, water: g.water },

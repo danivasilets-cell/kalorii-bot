@@ -79,7 +79,7 @@ const isOwner = (env, id) => String(id) === String(env.OWNER_ID);
 const fmtDate = (ts) => new Date(ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 const userLabel = (m) => `${esc(m.n || 'Без имени')}${m.u ? ' @' + esc(m.u) : ''}`;
 
-function openAppKeyboard(env, text = '🥗 Открыть дневник') {
+function openAppKeyboard(env, text = BOT_TR.uk.open) {
   return { inline_keyboard: [[{ text, web_app: { url: appUrl(env) } }]] };
 }
 
@@ -133,13 +133,15 @@ async function handleUpdate(u, env, ctx) {
   if (cmd === '/start') {
     const res = await touchUser(env, from);
     if (res && res.isNew && arg.startsWith('ref_')) await registerReferral(env, from, arg.slice(4));
+    const L = T(await userLang(env, from.id, from));
     if (arg.startsWith('ch_')) {
-      await send(env, from.id, '🏁 Вас пригласили в челлендж! Откройте приложение, чтобы присоединиться 👇',
-        { reply_markup: { inline_keyboard: [[{ text: '🏁 Присоединиться', web_app: { url: appUrl(env) + '#ch_' + arg.slice(3).replace(/[^a-z0-9]/g, '') } }]] } });
+      await send(env, from.id, L.chInvite,
+        { reply_markup: { inline_keyboard: [[{ text: L.join, web_app: { url: appUrl(env) + '#ch_' + arg.slice(3).replace(/[^a-z0-9]/g, '') } }]] } });
       if (res && res.isNew && env.OWNER_ID && !isOwner(env, from.id)) await send(env, env.OWNER_ID, `🆕 Новый пользователь (челлендж): ${userLabel(res.m)} (<code>${from.id}</code>)`);
       return;
     }
-    await send(env, from.id,
+    await send(env, from.id, L.hello(esc(from.first_name || '')), { reply_markup: openAppKeyboard(env, L.open) });
+    if (false) await send(env, from.id,
       `👋 Привет, <b>${esc(from.first_name || '')}</b>!\n\n` +
       `Я помогу считать калории, белки, жиры и углеводы.\n\n` +
       `🥗 Дневник питания, рецепты и план\n📷 Распознавание еды по фото\n🎙 Голосовой ввод\n💧 Вода, ⚖️ вес и 📊 статистика\n\n` +
@@ -153,7 +155,9 @@ async function handleUpdate(u, env, ctx) {
   }
 
   if (cmd === '/help') {
-    await send(env, from.id,
+    const L = T(await userLang(env, from.id, from));
+    await send(env, from.id, L.help, { reply_markup: openAppKeyboard(env, L.open) });
+    if (false) await send(env, from.id,
       `ℹ️ <b>Как пользоваться</b>\n\n` +
       `1. Откройте дневник кнопкой ниже или кнопкой «Открыть» слева от поля ввода.\n` +
       `2. При первом запуске заполните анкету — приложение посчитает вашу норму.\n` +
@@ -186,7 +190,7 @@ async function handleUpdate(u, env, ctx) {
   const ttl = { expirationTtl: 60 * 60 * 24 * 30 };
   if (fwd.ok) await env.DB.put(`r:${fwd.result.message_id}`, String(from.id), ttl);
   if (info.ok) await env.DB.put(`r:${info.result.message_id}`, String(from.id), ttl);
-  await send(env, from.id, '✉️ Сообщение передано автору. Ответ придёт сюда.');
+  await send(env, from.id, T(await userLang(env, from.id, from)).sent);
 }
 
 // ---------------- Команды владельца ----------------
@@ -447,8 +451,10 @@ async function setup(url, env) {
     drop_pending_updates: true,
   });
   results.commands = await tg(env, 'setMyCommands', {
-    commands: [{ command: 'start', description: 'Открыть дневник' }, { command: 'help', description: 'Помощь' }],
+    commands: [{ command: 'start', description: 'Відкрити щоденник' }, { command: 'help', description: 'Допомога' }],
   });
+  await tg(env, 'setMyCommands', { language_code: 'ru', commands: [{ command: 'start', description: 'Открыть дневник' }, { command: 'help', description: 'Помощь' }] });
+  await tg(env, 'setMyCommands', { language_code: 'en', commands: [{ command: 'start', description: 'Open diary' }, { command: 'help', description: 'Help' }] });
   results.ownerCommands = await tg(env, 'setMyCommands', {
     scope: { type: 'chat', chat_id: Number(env.OWNER_ID) },
     commands: [
@@ -462,14 +468,16 @@ async function setup(url, env) {
     ],
   });
   results.menuButton = await tg(env, 'setChatMenuButton', {
-    menu_button: { type: 'web_app', text: 'Открыть', web_app: { url: appUrl(env) } },
+    menu_button: { type: 'web_app', text: 'Відкрити', web_app: { url: appUrl(env) } },
   });
   results.description = await tg(env, 'setMyDescription', {
-    description: '🥗 Дневник калорий прямо в Telegram.\n\nСчитайте калории и БЖУ, воду и вес. Норма рассчитывается автоматически. Бесплатно и без рекламы.',
+    description: '🥗 Щоденник калорій прямо в Telegram.\n\nРахуйте калорії та БЖВ, воду й вагу. Розпізнавання їжі за фото й голосом, рецепти, план харчування. Безкоштовно й без реклами.\n\n👨‍💻 Розробник: Danya. Vas',
   });
-  results.shortDescription = await tg(env, 'setMyShortDescription', {
-    short_description: 'Дневник калорий и БЖУ в Telegram 🥗',
-  });
+  await tg(env, 'setMyDescription', { language_code: 'ru', description: '🥗 Дневник калорий прямо в Telegram.\n\nСчитайте калории и БЖУ, воду и вес. Распознавание еды по фото и голосу, рецепты, план питания. Бесплатно и без рекламы.\n\n👨‍💻 Разработчик: Danya. Vas' });
+  await tg(env, 'setMyDescription', { language_code: 'en', description: '🥗 Calorie diary right in Telegram.\n\nTrack calories, macros, water and weight. Food recognition by photo and voice, recipes, meal plans. Free and ad-free.\n\n👨‍💻 Developer: Danya. Vas' });
+  results.shortDescription = await tg(env, 'setMyShortDescription', { short_description: 'Щоденник калорій і БЖВ у Telegram 🥗' });
+  await tg(env, 'setMyShortDescription', { language_code: 'ru', short_description: 'Дневник калорий и БЖУ в Telegram 🥗' });
+  await tg(env, 'setMyShortDescription', { language_code: 'en', short_description: 'Calorie & macro diary in Telegram 🥗' });
   const ok = Object.values(results).every((r) => r.ok);
   const lines = Object.entries(results).map(([k, r]) => `${r.ok ? '✅' : '❌'} ${k}${r.ok ? '' : ': ' + r.description}`);
   return new Response(`${ok ? 'Готово! Бот настроен.' : 'Есть ошибки:'}\n\n${lines.join('\n')}`, {
@@ -636,7 +644,7 @@ async function apiAiChat(req, env) {
     .filter((m) => m.content);
   if (!history.length) return json({ ok: false, error: 'Пустое сообщение' }, 400);
   const sys = [
-    'Ты — дружелюбный ИИ-помощник по питанию в приложении «Калории». Отвечай по-русски, кратко и по делу (до 150 слов), используй списки и эмодзи умеренно.',
+    `Ты — дружелюбный ИИ-помощник по питанию в приложении «Калории». Отвечай на языке: ${String((body.context && body.context.language) || 'украинский').slice(0, 20)} — кратко и по делу (до 150 слов), используй списки и эмодзи умеренно.`,
     'Опирайся на данные пользователя (JSON ниже): цель, норму калорий и БЖУ, съеденное сегодня, историю и предпочтения. Считай остаток калорий из этих данных.',
     'Все расчёты калорий — приблизительные, говори об этом, когда даёшь цифры. Не выдавай оценки за точные медицинские данные.',
     'Ты не врач: не ставь диагнозы, не назначай лекарства и лечебные диеты. При болезнях, беременности, расстройствах пищевого поведения, резкой потере веса советуй обратиться к врачу.',
@@ -718,13 +726,14 @@ async function processReminders(env, budget) {
         const local = new Date(now.getTime() - ((rs && rs.tz) || 0) * 60000);
         if (rs && rs.items.weight && local.getUTCDay() !== (rs.items.weight.dow % 7)) continue;
       }
-      let text = REMINDER_TEXT[type];
+      const L = T(await userLang(env, uid));
+      let text = L.rem[type] || REMINDER_TEXT[type];
       if (type === 'stats') {
         const rs = await env.DB.get(`rs:${uid}`, 'json');
         const sm = await env.DB.get(`sm:${uid}`, 'json');
-        text = sm && sm.date === today8((rs && rs.tz) || 0) && sm.e > 0 ? summaryText(sm) : '📝 Сегодня в дневнике пока пусто. Запишите, что ели, — это займёт минуту 🙂';
+        text = sm && sm.date === today8((rs && rs.tz) || 0) && sm.e > 0 ? summaryText(sm, L) : L.rem.empty;
       }
-      const r = await send(env, uid, text, { reply_markup: openAppKeyboard(env, '🥗 Открыть дневник'), disable_notification: false });
+      const r = await send(env, uid, text, { reply_markup: openAppKeyboard(env, L.open), disable_notification: false });
       used++;
       if (!r.ok && r.error_code === 403) console.log('reminder blocked', uid);
     }
@@ -770,6 +779,10 @@ async function apiSync(req, env) {
   const { error, body, user } = await userFromBody(req, env, 20000);
   if (error) return error;
   const uid = String(user.id);
+  if (BOT_TR[body.lang]) {
+    const { metadata } = await env.DB.getWithMetadata(`u:${uid}`);
+    if (metadata && metadata.l !== body.lang) await env.DB.put(`u:${uid}`, '1', { metadata: { ...metadata, l: body.lang } });
+  }
   const d = body.day;
   if (d && /^\d{4}-\d{2}-\d{2}$/.test(d.date || '')) {
     const n = (x, max) => Math.max(0, Math.min(max, Math.round(Number(x) || 0)));
@@ -801,15 +814,17 @@ async function usageLastDays(env, days = 7) {
 const FEATURE_NAMES = { search: 'Поиск', photo: 'Фото', voice: 'Голос', scan: 'Штрихкод', chat: 'ИИ-помощник', recipe: 'Рецепты', plan: 'План', dish: 'Блюда', water: 'Вода', weight: 'Вес', template: 'Шаблоны дня', activity: 'Активность', fast: 'Голодание', measure: 'Замеры', challenge: 'Челленджи', share: 'Поделиться', export: 'Экспорт', copy: 'Копирование' };
 
 /** Персональный итог дня для вечернего напоминания. */
-function summaryText(sm) {
+function summaryText(sm, L = BOT_TR.uk) {
+  const S2 = L.sum;
   const goal = (sm.gk || 0) + (sm.burn || 0);
   const pct = goal ? Math.round((sm.k / goal) * 100) : 0;
-  const lines = [`📊 <b>Итог дня</b>`, '', `🔥 ${sm.k} из ${goal} ккал (${pct}%)${sm.burn ? ` · сожжено ${sm.burn}` : ''}`, `🥩 Белки ${sm.p} из ${sm.gp} г`, `💧 Вода ${(sm.w / 1000).toFixed(1).replace('.', ',')} из ${(sm.gw / 1000).toFixed(1).replace('.', ',')} л`, ''];
-  if (pct >= 90 && pct <= 110) lines.push('Отличный баланс — так держать 👍');
-  else if (pct < 90) lines.push(`Есть запас ${goal - sm.k} ккал — не забудьте поужинать 🙂`);
-  else lines.push('Немного больше нормы — ничего страшного, завтра новый день 💪');
-  if (sm.gp && sm.p < sm.gp * 0.85) lines.push(`Белка не хватило ~${sm.gp - sm.p} г — добавьте творог, яйца или курицу.`);
-  if (sm.gw && sm.w < sm.gw * 0.7) lines.push('Воды маловато — выпейте стакан перед сном 💧');
+  const lit = (x) => (x / 1000).toFixed(1).replace('.', L === BOT_TR.en ? '.' : ',');
+  const lines = [S2.title, '', `🔥 ${sm.k} ${S2.of} ${goal} ${S2.kcal} (${pct}%)${sm.burn ? ` · ${S2.burned} ${sm.burn}` : ''}`, `🥩 ${S2.protein} ${sm.p} ${S2.of} ${sm.gp} ${S2.g}`, `💧 ${S2.water} ${lit(sm.w)} ${S2.of} ${lit(sm.gw)} ${S2.l}`, ''];
+  if (pct >= 90 && pct <= 110) lines.push(S2.ok);
+  else if (pct < 90) lines.push(S2.under(goal - sm.k));
+  else lines.push(S2.over);
+  if (sm.gp && sm.p < sm.gp * 0.85) lines.push(S2.lowP(sm.gp - sm.p));
+  if (sm.gw && sm.w < sm.gw * 0.7) lines.push(S2.lowW);
   return lines.join('\n');
 }
 
@@ -823,13 +838,14 @@ async function parseFoodText(env, text) {
 }
 async function handleFoodMessage(env, msg, textIn) {
   const uid = msg.from.id;
-  if (!env.AI) return send(env, uid, 'Голосовой ввод пока не подключён. Откройте дневник кнопкой «Открыть».');
+  const L = T(await userLang(env, uid, msg.from));
+  if (!env.AI) return send(env, uid, L.voiceOff);
   let text = textIn;
   if (!text) {
-    if (!(await takeQuota(env, uid, 'voice'))) return send(env, uid, 'Лимит голосовых на сегодня исчерпан. Откройте дневник, чтобы добавить вручную.');
+    if (!(await takeQuota(env, uid, 'voice'))) return send(env, uid, L.voiceLimit);
     const fileId = (msg.voice || msg.audio || {}).file_id;
     const f = await tg(env, 'getFile', { file_id: fileId });
-    if (!f.ok) return send(env, uid, 'Не удалось получить голосовое 😕');
+    if (!f.ok) return send(env, uid, L.noFile);
     const buf = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${f.result.file_path}`).then((r) => r.arrayBuffer());
     let b64 = '';
     const bytes = new Uint8Array(buf);
@@ -841,18 +857,18 @@ async function handleFoodMessage(env, msg, textIn) {
       catch { r = await env.AI.run('@cf/openai/whisper', { audio: [...bytes] }); }
       text = String((r && r.text) || '').trim();
     } catch (e) { console.log('bot voice failed', e && e.stack); }
-    if (!text) return send(env, uid, 'Не разобрал голосовое 😕 Попробуйте ещё раз или напишите текстом: <code>+ два яйца и кофе</code>');
-  } else if (!(await takeQuota(env, uid, 'parse'))) return send(env, uid, 'Лимит на сегодня исчерпан.');
+    if (!text) return send(env, uid, L.noVoice);
+  } else if (!(await takeQuota(env, uid, 'parse'))) return send(env, uid, L.limit);
   let items = [];
   try { items = await parseFoodText(env, text); } catch (e) { console.log('bot parse failed', e && e.stack); }
   await env.DB.put(`pv:${uid}`, JSON.stringify({ text, items, at: Date.now() }), { expirationTtl: 86400 });
-  const MEAL = { b: 'завтрак', l: 'обед', d: 'ужин', s: 'перекус' };
+  const MEAL = L.meals;
   const list = items.length
     ? items.map((x) => `• ${esc(x.name)}${x.count ? ` × ${x.count}` : ''}${x.grams ? ` — ~${Math.round(x.grams)} г` : ''}${x.kcal && x.grams ? ` (≈${Math.round(x.kcal * x.grams / 100)} ккал)` : ''}`).join('\n')
-    : 'Не удалось выделить продукты — проверьте в приложении.';
+    : L.noItems;
   const meal = items.find((x) => x.meal);
-  await send(env, uid, `${textIn ? '✍️' : '🎙'} «${esc(text)}»\n\n${list}${meal ? `\n\n🍽 ${MEAL[meal.meal]}` : ''}\n\nПроверьте вес и добавьте в дневник 👇`,
-    { reply_markup: { inline_keyboard: [[{ text: '✅ Проверить и добавить', web_app: { url: appUrl(env) + '#pending' } }]] } });
+  await send(env, uid, `${textIn ? '✍️' : '🎙'} «${esc(text)}»\n\n${list}${meal ? `\n\n🍽 ${MEAL[meal.meal]}` : ''}\n\n${L.checkAdd}`,
+    { reply_markup: { inline_keyboard: [[{ text: L.check, web_app: { url: appUrl(env) + '#pending' } }]] } });
 }
 async function apiPending(req, env) {
   const { error, user } = await userFromBody(req, env, 10000);
@@ -894,7 +910,8 @@ async function processOneOff(env, budget) {
   for (const [uid, it] of Object.entries(slot)) {
     if (Math.abs(it.at - now.getTime()) > 5 * 60000) { if (it.at < now.getTime()) { delete slot[uid]; changed = true; } continue; }
     if (used >= budget) break;
-    await send(env, uid, '⏰ Голодание завершено — окно питания открыто! Начните с белка и овощей 🥗', { reply_markup: openAppKeyboard(env, '🥗 Открыть дневник') });
+    const L = T(await userLang(env, uid));
+    await send(env, uid, L.fastEnd, { reply_markup: openAppKeyboard(env, L.open) });
     used++; delete slot[uid]; changed = true;
     await env.DB.delete(`fs:${uid}`);
   }
@@ -926,7 +943,7 @@ async function registerReferral(env, newUser, refId) {
   await env.DB.put(key, '1', { metadata: { ...metadata, r: refId } });
   const count = (Number(await env.DB.get(`rc:${refId}`)) || 0) + 1;
   await env.DB.put(`rc:${refId}`, String(count));
-  await send(env, refId, `🎉 По вашему приглашению присоединился ${esc(newUser.first_name || 'друг')}! Всего приглашено: ${count}.`);
+  await send(env, refId, T(await userLang(env, refId)).refJoined(esc(newUser.first_name || '🙂'), count));
 }
 
 // ---------- Челленджи ----------
@@ -960,7 +977,7 @@ async function apiChallenge(req, env) {
       if (Object.keys(c.members).length >= 50) return json({ ok: false, error: 'В челлендже уже 50 участников' }, 400);
       c.members[uid] = { n: name, done: {} };
       await save(c);
-      if (c.owner !== uid) await send(env, c.owner, `🏁 ${esc(name)} присоединился к челленджу «${esc(c.title)}»!`);
+      if (c.owner !== uid) { const ol = await userLang(env, c.owner); await send(env, c.owner, T(ol).chJoined(esc(name), esc((CH_TITLES[ol] || {})[c.type] || c.title))); }
     }
     if (!mine.includes(c.id)) await env.DB.put(myKey, JSON.stringify([c.id, ...mine].slice(0, 10)));
     return json({ ok: true, challenge: c, link: await link(c.id) });
@@ -1014,3 +1031,80 @@ const SEGMENTS = {
   active: ['Активным за 7 дней', (u, now) => now - (u.m.s || 0) < 7 * 86400e3],
   app: ['Кто открывал приложение', (u) => (u.m.o || 0) > 0],
 };
+
+// =====================================================================
+//  Языки бота: украинский (основной), русский, английский
+// =====================================================================
+const BOT_TR = {
+  uk: {
+    open: '🥗 Відкрити щоденник', join: '🏁 Приєднатися', check: '✅ Перевірити й додати',
+    hello: (n) => `👋 Привіт, <b>${n}</b>!\n\nЯ допоможу рахувати калорії, білки, жири та вуглеводи.\n\n🥗 Щоденник харчування, рецепти й план\n📷 Розпізнавання їжі за фото\n🎙 Голосове введення\n💧 Вода, ⚖️ вага і 📊 статистика\n\n💡 Можна просто сюди надіслати голосове «з'їв два яйця й каву» або написати <code>+ банан і йогурт</code> — я розберу й запропоную додати.\n\nНатисніть кнопку нижче, щоб відкрити щоденник. Ваші записи бачите лише ви.`,
+    help: `ℹ️ <b>Як користуватися</b>\n\n1. Відкрийте щоденник кнопкою нижче або кнопкою «Відкрити» ліворуч від поля введення.\n2. Під час першого запуску заповніть анкету — застосунок розрахує вашу норму.\n3. Додавайте їжу в сніданок, обід, вечерю й перекуси.\n4. Або надішліть сюди голосове / повідомлення з «+»: <code>+ 2 яйця і 100 г гречки на обід</code>\n\nЄ питання чи ідея? Просто напишіть сюди — повідомлення прочитає автор.\n\n👨‍💻 Розроблено розробником <b>Danya. Vas</b> за підтримки тестувальника <b>Не вказано</b>.`,
+    sent: '✉️ Повідомлення передано автору. Відповідь прийде сюди.',
+    chInvite: '🏁 Вас запросили в челендж! Відкрийте застосунок, щоб приєднатися 👇',
+    voiceOff: 'Голосове введення поки не підключене. Відкрийте щоденник кнопкою «Відкрити».',
+    voiceLimit: 'Ліміт голосових на сьогодні вичерпано. Відкрийте щоденник, щоб додати вручну.',
+    limit: 'Ліміт на сьогодні вичерпано.',
+    noFile: 'Не вдалося отримати голосове 😕',
+    noVoice: 'Не розібрав голосове 😕 Спробуйте ще раз або напишіть текстом: <code>+ два яйця і кава</code>',
+    noItems: 'Не вдалося виділити продукти — перевірте в застосунку.',
+    checkAdd: 'Перевірте вагу й додайте в щоденник 👇',
+    meals: { b: 'сніданок', l: 'обід', d: 'вечеря', s: 'перекус' },
+    rem: { diary: '📝 Не забудьте записати їжу в щоденник — це займе хвилину.', water: '💧 Час випити склянку води!', weight: '⚖️ Сьогодні день зважування. Запишіть вагу — вранці натщесерце найчесніше.', plan: '🗓 Перегляньте план харчування на завтра.', empty: '📝 Сьогодні в щоденнику поки порожньо. Запишіть, що їли, — це займе хвилину 🙂' },
+    fastEnd: '⏰ Голодування завершено — вікно харчування відкрите! Почніть із білка та овочів 🥗',
+    refJoined: (n, c) => `🎉 За вашим запрошенням приєднався ${n}! Усього запрошено: ${c}.`,
+    chJoined: (n, t) => `🏁 ${n} приєднався до челенджу «${t}»!`,
+    sum: { title: '📊 <b>Підсумок дня</b>', kcal: 'ккал', burned: 'спалено', protein: 'Білки', water: 'Вода', of: 'з', g: 'г', l: 'л', ok: 'Чудовий баланс — так тримати 👍', under: (x) => `Є запас ${x} ккал — не забудьте повечеряти 🙂`, over: 'Трохи більше норми — нічого страшного, завтра новий день 💪', lowP: (x) => `Білка не вистачило ~${x} г — додайте сир, яйця або курку.`, lowW: 'Води замало — випийте склянку перед сном 💧' },
+  },
+  ru: {
+    open: '🥗 Открыть дневник', join: '🏁 Присоединиться', check: '✅ Проверить и добавить',
+    hello: (n) => `👋 Привет, <b>${n}</b>!\n\nЯ помогу считать калории, белки, жиры и углеводы.\n\n🥗 Дневник питания, рецепты и план\n📷 Распознавание еды по фото\n🎙 Голосовой ввод\n💧 Вода, ⚖️ вес и 📊 статистика\n\n💡 Можно прямо сюда отправить голосовое «съел два яйца и кофе» или написать <code>+ банан и йогурт</code> — я разберу и предложу добавить.\n\nНажмите кнопку ниже, чтобы открыть дневник. Ваши записи видны только вам.`,
+    help: `ℹ️ <b>Как пользоваться</b>\n\n1. Откройте дневник кнопкой ниже или кнопкой «Открыть» слева от поля ввода.\n2. При первом запуске заполните анкету — приложение посчитает вашу норму.\n3. Добавляйте еду в завтрак, обед, ужин и перекусы.\n4. Или пришлите сюда голосовое / сообщение с «+»: <code>+ 2 яйца и 100 г гречки на обед</code>\n\nЕсть вопрос или идея? Просто напишите сюда сообщение — его прочитает автор.\n\n👨‍💻 Разработано разработчиком <b>Danya. Vas</b> при поддержке тестировщика <b>Не указано</b>.`,
+    sent: '✉️ Сообщение передано автору. Ответ придёт сюда.',
+    chInvite: '🏁 Вас пригласили в челлендж! Откройте приложение, чтобы присоединиться 👇',
+    voiceOff: 'Голосовой ввод пока не подключён. Откройте дневник кнопкой «Открыть».',
+    voiceLimit: 'Лимит голосовых на сегодня исчерпан. Откройте дневник, чтобы добавить вручную.',
+    limit: 'Лимит на сегодня исчерпан.',
+    noFile: 'Не удалось получить голосовое 😕',
+    noVoice: 'Не разобрал голосовое 😕 Попробуйте ещё раз или напишите текстом: <code>+ два яйца и кофе</code>',
+    noItems: 'Не удалось выделить продукты — проверьте в приложении.',
+    checkAdd: 'Проверьте вес и добавьте в дневник 👇',
+    meals: { b: 'завтрак', l: 'обед', d: 'ужин', s: 'перекус' },
+    rem: { diary: '📝 Не забудьте записать еду в дневник — это займёт минуту.', water: '💧 Время выпить стакан воды!', weight: '⚖️ Сегодня день взвешивания. Запишите вес — утром натощак честнее всего.', plan: '🗓 Посмотрите план питания на завтра.', empty: '📝 Сегодня в дневнике пока пусто. Запишите, что ели, — это займёт минуту 🙂' },
+    fastEnd: '⏰ Голодание завершено — окно питания открыто! Начните с белка и овощей 🥗',
+    refJoined: (n, c) => `🎉 По вашему приглашению присоединился ${n}! Всего приглашено: ${c}.`,
+    chJoined: (n, t) => `🏁 ${n} присоединился к челленджу «${t}»!`,
+    sum: { title: '📊 <b>Итог дня</b>', kcal: 'ккал', burned: 'сожжено', protein: 'Белки', water: 'Вода', of: 'из', g: 'г', l: 'л', ok: 'Отличный баланс — так держать 👍', under: (x) => `Есть запас ${x} ккал — не забудьте поужинать 🙂`, over: 'Немного больше нормы — ничего страшного, завтра новый день 💪', lowP: (x) => `Белка не хватило ~${x} г — добавьте творог, яйца или курицу.`, lowW: 'Воды маловато — выпейте стакан перед сном 💧' },
+  },
+  en: {
+    open: '🥗 Open diary', join: '🏁 Join', check: '✅ Review and add',
+    hello: (n) => `👋 Hi, <b>${n}</b>!\n\nI’ll help you track calories, protein, fat and carbs.\n\n🥗 Food diary, recipes and meal plan\n📷 Food recognition from photos\n🎙 Voice input\n💧 Water, ⚖️ weight and 📊 stats\n\n💡 You can send me a voice message like “two eggs and coffee” or write <code>+ banana and yogurt</code> — I’ll parse it and offer to add it.\n\nTap the button below to open your diary. Your entries are visible only to you.`,
+    help: `ℹ️ <b>How to use</b>\n\n1. Open the diary with the button below or the “Open” button next to the input field.\n2. On first launch fill in the questionnaire — the app will calculate your goals.\n3. Add food to breakfast, lunch, dinner and snacks.\n4. Or send a voice message / a message starting with “+”: <code>+ 2 eggs and 100 g buckwheat for lunch</code>\n\nQuestions or ideas? Just write here — the author will read it.\n\n👨‍💻 Developed by <b>Danya. Vas</b> with the support of tester <b>Not specified</b>.`,
+    sent: '✉️ Your message was sent to the author. The reply will come here.',
+    chInvite: '🏁 You’ve been invited to a challenge! Open the app to join 👇',
+    voiceOff: 'Voice input isn’t connected yet. Open the diary with the “Open” button.',
+    voiceLimit: 'Today’s voice limit is reached. Open the diary to add manually.',
+    limit: 'Today’s limit is reached.',
+    noFile: 'Couldn’t get the voice message 😕',
+    noVoice: 'Couldn’t understand the voice message 😕 Try again or type: <code>+ two eggs and coffee</code>',
+    noItems: 'Couldn’t detect foods — please check in the app.',
+    checkAdd: 'Check the amounts and add to your diary 👇',
+    meals: { b: 'breakfast', l: 'lunch', d: 'dinner', s: 'snack' },
+    rem: { diary: '📝 Don’t forget to log your food — it takes a minute.', water: '💧 Time for a glass of water!', weight: '⚖️ It’s weigh-in day. Log your weight — in the morning before eating is best.', plan: '🗓 Check your meal plan for tomorrow.', empty: '📝 Your diary is empty today. Log what you ate — it takes a minute 🙂' },
+    fastEnd: '⏰ Fast complete — your eating window is open! Start with protein and veggies 🥗',
+    refJoined: (n, c) => `🎉 ${n} joined via your invite! Total invited: ${c}.`,
+    chJoined: (n, t) => `🏁 ${n} joined the “${t}” challenge!`,
+    sum: { title: '📊 <b>Daily summary</b>', kcal: 'kcal', burned: 'burned', protein: 'Protein', water: 'Water', of: 'of', g: 'g', l: 'L', ok: 'Great balance — keep it up 👍', under: (x) => `You have ${x} kcal left — don’t skip dinner 🙂`, over: 'A bit over your goal — no worries, tomorrow is a new day 💪', lowP: (x) => `You were ~${x} g short on protein — add cottage cheese, eggs or chicken.`, lowW: 'Not much water today — have a glass before bed 💧' },
+  },
+};
+const CH_TITLES = {
+  uk: { water: '💧 Пити норму води', log: '📝 Заповнювати щоденник', protein: '💪 Норма білка', kcal: '🎯 Вкластися в норму калорій', nosweet: '🍬 Без солодкого' },
+  en: { water: '💧 Drink your water goal', log: '📝 Log your diary', protein: '💪 Protein goal', kcal: '🎯 Stay within calorie goal', nosweet: '🍬 No sweets' },
+};
+const mapLangCode = (c) => (/^uk/.test(c || '') ? 'uk' : /^(ru|be|kk)/.test(c || '') ? 'ru' : c ? 'en' : 'uk');
+async function userLang(env, uid, from) {
+  const { metadata } = await env.DB.getWithMetadata(`u:${uid}`);
+  if (metadata && metadata.l && BOT_TR[metadata.l]) return metadata.l;
+  return mapLangCode(from && from.language_code);
+}
+const T = (lang) => BOT_TR[lang] || BOT_TR.uk;

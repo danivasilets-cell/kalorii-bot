@@ -15,7 +15,7 @@ async function syncNow() {
   if (!hasUsage && !dayDirty) return;
   if (Date.now() - lastSync < 15000) return syncSoon();
   lastSync = Date.now();
-  const body = { initData: tg.initData, usage: { ...usage } };
+  const body = { initData: tg.initData, usage: { ...usage }, lang: LANG };
   Object.keys(usage).forEach((k) => delete usage[k]);
   if (dayDirty && S.todaySummary) { body.day = S.todaySummary; dayDirty = false; }
   try { await fetch(API_URL + '/api/sync', { method: 'POST', body: JSON.stringify(body), keepalive: true }); } catch {}
@@ -354,11 +354,12 @@ async function weekCard() {
   x.fillStyle = bg; x.fillRect(0, 0, W, H);
   const orb = (cx, cy, r, col) => { const gr = x.createRadialGradient(cx, cy, 0, cx, cy, r); gr.addColorStop(0, col); gr.addColorStop(1, 'rgba(0,0,0,0)'); x.fillStyle = gr; x.fillRect(0, 0, W, H); };
   orb(900, 120, 520, 'rgba(63,212,255,.55)'); orb(80, 700, 480, 'rgba(43,91,255,.5)');
+  const T = (s) => tr(s);
   const font = (w, s) => `${w} ${s}px Unbounded, Manrope, -apple-system, sans-serif`;
   x.fillStyle = '#fff'; x.font = font(700, 44); x.fillText(CFG.title || 'Калории', 80, 130);
-  x.globalAlpha = 0.75; x.font = font(600, 34); x.fillText(`Моя неделя · ${dateText(days[0].date)} — ${dateText(days[6].date)}`, 80, 190); x.globalAlpha = 1;
+  x.globalAlpha = 0.75; x.font = font(600, 34); x.fillText(T(`Моя неделя · ${dateText(days[0].date)} — ${dateText(days[6].date)}`), 80, 190); x.globalAlpha = 1;
   x.font = font(700, 170); x.fillText(n0(avg(logged.map((d) => d.t.k))), 80, 420);
-  x.font = font(600, 40); x.globalAlpha = 0.8; x.fillText(`ккал в день в среднем · норма ${n0(g.kcal)}`, 84, 480); x.globalAlpha = 1;
+  x.font = font(600, 40); x.globalAlpha = 0.8; x.fillText(T(`ккал в день в среднем · норма ${n0(g.kcal)}`), 84, 480); x.globalAlpha = 1;
   // столбики
   const max = Math.max(g.kcal * 1.2, ...days.map((d) => d.t.k));
   days.forEach((d, i) => {
@@ -366,7 +367,7 @@ async function weekCard() {
     x.fillStyle = 'rgba(255,255,255,.14)'; x.beginPath(); x.roundRect(bx, 580, bw, 300, 22); x.fill();
     const gr = x.createLinearGradient(0, by, 0, 880); gr.addColorStop(0, '#8de3ff'); gr.addColorStop(1, '#2a74f5');
     x.fillStyle = d.t.k > g.kcal * 1.1 ? '#ffb547' : gr; if (bh > 0) { x.beginPath(); x.roundRect(bx, by, bw, bh, 22); x.fill(); }
-    x.fillStyle = 'rgba(255,255,255,.75)'; x.font = font(600, 30); x.textAlign = 'center'; x.fillText(['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'][d.date.getDay()], bx + bw / 2, 930); x.textAlign = 'left';
+    x.fillStyle = 'rgba(255,255,255,.75)'; x.font = font(600, 30); x.textAlign = 'center'; x.fillText(T(['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'][d.date.getDay()]), bx + bw / 2, 930); x.textAlign = 'left';
   });
   const ws = S.weights.filter(([iso]) => parseIso(iso) >= addDays(days[0].date, -3));
   const tiles = [[`🔥 ${streak()}`, plural(streak(), 'день подряд', 'дня подряд', 'дней подряд')], [`${logged.length}/7`, 'дней с записями'], [ws.length >= 2 ? `${ws[ws.length - 1][1] - ws[0][1] > 0 ? '+' : ''}${n1(ws[ws.length - 1][1] - ws[0][1])} кг` : `${n0(avg(days.filter((d) => d.w).map((d) => d.w)))} мл`, ws.length >= 2 ? 'вес за неделю' : 'воды в день']];
@@ -374,9 +375,9 @@ async function weekCard() {
     const tx = 80 + i * 320;
     x.fillStyle = 'rgba(255,255,255,.12)'; x.beginPath(); x.roundRect(tx, 1010, 290, 200, 36); x.fill();
     x.fillStyle = '#fff'; x.font = font(700, 54); x.fillText(v, tx + 32, 1100);
-    x.globalAlpha = 0.75; x.font = font(600, 28); x.fillText(l, tx + 32, 1160); x.globalAlpha = 1;
+    x.globalAlpha = 0.75; x.font = font(600, 28); x.fillText(T(l), tx + 32, 1160); x.globalAlpha = 1;
   });
-  x.globalAlpha = 0.6; x.font = font(600, 28); x.fillText('Дневник питания в Telegram', 80, 1290); x.globalAlpha = 1;
+  x.globalAlpha = 0.6; x.font = font(600, 28); x.fillText(T('Дневник питания в Telegram'), 80, 1290); x.globalAlpha = 1;
   return c.toDataURL('image/png');
 }
 function weekCardSheet() {

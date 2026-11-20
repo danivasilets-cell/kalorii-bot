@@ -225,7 +225,7 @@ async function buildCsv(n) {
     d.e.forEach((e) => { const x = per(e, e.g); rows.push([isoDate(d.date), MEAL[e.m] || '', e.n, qtyText(e), f1(e.g), f1(x.k), f1(x.p), f1(x.f), f1(x.c), d.w]); });
   }
   rows.push([]); rows.push(['Вес']); S.weights.forEach(([iso, kg]) => rows.push([iso, '', '', '', '', '', '', '', '', '', f1(kg)]));
-  return rows.map((r) => r.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(';')).join('\r\n');
+  return rows.map((r) => r.map((c) => `"${tr(String(c ?? '')).replace(/"/g, '""')}"`).join(';')).join('\r\n');
 }
 async function buildReport(n) {
   const days = await loadDays(n);
@@ -233,7 +233,7 @@ async function buildReport(n) {
   const logged = days.filter((d) => d.t.k > 0);
   const ins = insights(days, [], g).map(([i, t]) => `<li>${i} ${t}</li>`).join('');
   const rows = days.slice().reverse().filter((d) => d.t.k > 0).map((d) => `<tr><td>${dateText(d.date)}</td><td>${n0(d.t.k)}</td><td>${n0(d.t.p)}</td><td>${n0(d.t.f)}</td><td>${n0(d.t.c)}</td><td>${n0(d.w)}</td></tr>`).join('');
-  return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Отчёт о питании</title>
+  return tr(`<!doctype html><html lang="${LANG}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Отчёт о питании</title>
   <style>body{font:15px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#0b1b36;max-width:760px;margin:24px auto;padding:0 16px}h1{margin:0 0 4px}p.s{color:#6b80a4;margin:0 0 20px}
   .k{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}.k div{flex:1;min-width:140px;border:1px solid #dbe6f7;border-radius:14px;padding:12px}.k b{display:block;font-size:22px}
   table{width:100%;border-collapse:collapse;margin-top:12px}th,td{padding:8px;border-bottom:1px solid #e3ecf8;text-align:right}th:first-child,td:first-child{text-align:left}th{color:#6b80a4;font-weight:600}
@@ -242,7 +242,7 @@ async function buildReport(n) {
   <div class="k"><div><span>Норма</span><b>${n0(g.kcal)} ккал</b></div><div><span>В среднем</span><b>${n0(avg(logged.map((d) => d.t.k)))} ккал</b></div><div><span>Дней с записями</span><b>${logged.length} из ${n}</b></div></div>
   <h3>Выводы</h3><ul>${ins || '<li>Недостаточно данных</li>'}</ul>
   <h3>По дням</h3><table><tr><th>Дата</th><th>Ккал</th><th>Б, г</th><th>Ж, г</th><th>У, г</th><th>Вода, мл</th></tr>${rows}</table>
-  <p class="s" style="margin-top:20px">Все значения рассчитаны по вашим записям и носят ориентировочный характер.</p></body></html>`;
+  <p class="s" style="margin-top:20px">Все значения рассчитаны по вашим записям и носят ориентировочный характер.</p></body></html>`);
 }
 
 Object.assign(actions, {

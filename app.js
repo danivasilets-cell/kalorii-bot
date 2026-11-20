@@ -555,6 +555,7 @@ function renderProfile() {
     ${CFG.achievements ? achievementsHTML(got) : ''}
     <div class="section-h"><span>Настройки</span></div>
     <div class="list">
+      <div class="field"><span class="fic">🌐</span><label>Язык</label><div class="seg mini" data-notr>${LANGS.map(([v, t, f]) => `<button data-a="setLangBtn" data-v="${v}" class="${LANG === v ? 'on' : ''}">${f} ${v.toUpperCase()}</button>`).join('')}</div></div>
       <button class="row" data-a="setTarget"><div class="fic">🎯</div><div class="main"><div class="title">Цель по весу</div><div class="sub">${S.profile.target ? `${n1(S.profile.target)} кг` : 'не указана'}</div></div><span class="chev">›</span></button>
       <button class="row" data-a="invite"><div class="fic">🤝</div><div class="main"><div class="title">Пригласить друга</div><div class="sub">${S.profile.refCount ? `приглашено: ${S.profile.refCount}` : 'ссылка-приглашение'}</div></div><span class="chev">›</span></button>
       <button class="row" data-a="challenges"><div class="fic">🏁</div><div class="main"><div class="title">Челленджи с друзьями</div><div class="sub">вода, белок, без сладкого…</div></div><span class="chev">›</span></button>
@@ -575,7 +576,7 @@ function renderProfile() {
 function achievementsHTML(got) {
   const next = ACH.filter((a) => !S.ach[a.id] && a.pr).map((a) => ({ a, p: a.pr() })).sort((x, y) => y.p[0] / y.p[1] - x.p[0] / x.p[1])[0];
   const hist = Object.entries(S.ach).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id, ts]) => ({ a: ACH.find((x) => x.id === id), ts })).filter((x) => x.a);
-  return `<div class="section-h"><span>Достижения</span><span>${got} из ${ACH.length}</span></div>
+  return `<div class="section-h"><span>Достижения</span><span>${got}/${ACH.length}</span></div>
     ${next ? `<div class="card next-ach"><div class="medal-sm">${next.a.i}</div><div class="main"><b>Следующее: ${next.a.t}</b><small>${next.a.d}</small>
       <div class="bar"><i style="width:${Math.min(100, (next.p[0] / next.p[1]) * 100)}%;background:var(--grad)"></i></div><small>${Math.min(next.p[0], next.p[1])} из ${next.p[1]}</small></div></div>` : ''}
     <div class="card"><div class="badges">${ACH.map((a) => `<button class="badge-item ${S.ach[a.id] ? 'on' : ''}" data-a="badge" data-id="${a.id}"><div class="medal">${a.i}</div><span>${a.t}</span></button>`).join('')}</div></div>
@@ -683,10 +684,10 @@ function addFoodSheet(meal, opts = {}) {
     const scored = [];
     const dishes = S.dishes.map(dishAsFood), recipes = RECIPES.map((r) => ({ ...recipeAsFood(r), emoji: r.e }));
     for (const f of [...featured(), ...dishes, ...S.custom, ...S.recent, ...BUILTIN, ...recipes]) {
-      const name = norm(f.n), hay = name + ' ' + norm(f.b || '');
+      const name = norm(f.n), tn = norm(trName(f.n)), hay = name + ' ' + tn + ' ' + norm(f.b || '');
       if (!words.every((w) => hay.includes(w)) || seen.has(foodKey(f))) continue;
       seen.add(foodKey(f));
-      const score = name.startsWith(q) ? 0 : name.split(/[\s(,-]+/).some((w) => w.startsWith(words[0])) ? 1 : 2;
+      const score = name.startsWith(q) || tn.startsWith(q) ? 0 : (name + ' ' + tn).split(/[\s(,'-]+/).some((w) => w.startsWith(words[0])) ? 1 : 2;
       scored.push([score, name.length, f]);
     }
     return scored.sort((a, b) => a[0] - b[0] || a[1] - b[1]).slice(0, 60).map((x) => x[2]);
@@ -1014,7 +1015,7 @@ async function checkAchievements() {
   fresh.forEach((a) => { S.ach[a.id] = Date.now(); });
   celebrate();
   haptic('success');
-  toast(`🏆 ${fresh[0].i} ${fresh[0].t} — ${fresh[0].d.toLowerCase()}${fresh.length > 1 ? ` (+${fresh.length - 1})` : ''}`);
+  toast(`🏆 ${fresh[0].i} ${fresh[0].t}: ${fresh[0].d}${fresh.length > 1 ? ` (+${fresh.length - 1})` : ''}`);
   if (S.tab === 'profile' && !sheets.length) render();
   await Store.set('ach', JSON.stringify(S.ach));
 }
@@ -1089,7 +1090,7 @@ function showWelcome() {
 }
 
 // ---------- Глобальные настройки (меняются владельцем в скрытой панели) ----------
-const APP_VERSION = '5.0';
+const APP_VERSION = '5.1';
 const DEFAULT_CONFIG = {
   title: 'Калории',
   theme: 'ice',
@@ -1485,6 +1486,15 @@ const actions = {
   mealMenu(d) { openSheet(mealMenuSheet(d.m)); },
   async hintClose() { S.profile.hintDone = true; render(); await saveProfile(); },
   notif() { openSheet(notifSheet()); },
+  async setLangBtn(d) {
+    setLang(d.v);
+    S.profile.lang = d.v;
+    startTranslator();
+    render();
+    haptic('success');
+    dayDirty = true; syncSoon();
+    await saveProfile();
+  },
   async setTheme(d) { S.profile.theme = d.v; applyTheme(); render(); await saveProfile(); },
   async pickDay(d) { haptic(); await loadDay(parseIso(d.d)); render(); },
   secret() { secretTap(); },
@@ -1590,6 +1600,7 @@ async function init() {
   S.custom = parse(v.custom, []);
   S.weights = parse(v.weights, []);
   applyTheme();
+  if (S.profile.lang && S.profile.lang !== LANG) { setLang(S.profile.lang); startTranslator(); }
   const stripKeys = Array.from({ length: 21 }, (_, i) => dayKey(addDays(startOfDay(new Date()), -i))).filter((k) => S.daySet.has(k));
   const stripVals = await Store.get(stripKeys);
   for (const k of stripKeys) S.strip.set(k, totalsOf(parse(stripVals[k], { e: [] }).e || []).k);
