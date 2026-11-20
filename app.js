@@ -175,6 +175,10 @@ const S = {
   shop: {}, // список покупок
   chat: [], // ИИ-помощник
   daysCache: null, // кэш для статистики
+  templates: [], // шаблоны дня
+  meas: [], // замеры тела [[YYYY-MM-DD, {w,h,c,a}]]
+  challenges: null, // челленджи (с сервера)
+  ref: null, // приглашения (с сервера)
 };
 
 // Еда: { n: название, b: бренд, k/p/f/c: на 100 г, s: порция, g: граммы, m: приём пищи, bc: штрихкод }
@@ -200,6 +204,8 @@ async function saveDay() {
   S.strip.set(key, totalsOf(S.data.e).k);
   S.history = null;
   S.daysCache = null;
+  updateTodaySummary();
+  autoMarkChallenges();
   await checkAchievements();
 }
 async function saveProfile() { await Store.set('profile', JSON.stringify(S.profile)); }
@@ -288,9 +294,11 @@ function mealSeg(current) {
 // ---------- Экран «Дневник» ----------
 function renderDiary() {
   const g = goals(S.profile);
+  const burned = burnedOf(S.data);
+  const goalK = dayGoal();
   const t = totalsOf(S.data.e);
-  const left = g.kcal - t.k;
-  const pct = Math.min(t.k / Math.max(g.kcal, 1), 1);
+  const left = goalK - t.k;
+  const pct = Math.min(t.k / Math.max(goalK, 1), 1);
   const C = 2 * Math.PI * 52;
   const isToday = sameDay(S.day, startOfDay(new Date()));
   const macro = (label, v, goal, color) => {
@@ -361,11 +369,14 @@ function renderDiary() {
         </div>
         <div>
           <div class="stat"><div class="label">Съедено</div><div class="value">${n0(t.k)} <span>ккал</span></div></div>
-          <div class="stat"><div class="label">Норма</div><div class="value">${n0(g.kcal)} <span>ккал</span></div></div>
+          <div class="stat"><div class="label">Норма${burned && S.profile.addBurn !== false ? ` + 🔥${n0(burned)}` : ''}</div><div class="value">${n0(goalK)} <span>ккал</span></div></div>
         </div>
       </div>
       <div class="macros">${macro('Белки', t.p, g.protein, 'var(--prot)')}${macro('Жиры', t.f, g.fat, 'var(--fat)')}${macro('Углев.', t.c, g.carbs, 'var(--carb)')}</div>
     </div>
+    ${isToday ? suggestHTML(left, g.protein - t.p) : ''}
+    ${isToday ? fastHTML() : ''}
+    ${isToday ? challengesHTML() : ''}
     <div class="quick-row">
       <button data-a="aiPhoto"><span>📷</span>Фото</button>
       <button data-a="aiVoice"><span>🎙</span>Голос</button>
@@ -381,8 +392,14 @@ function renderDiary() {
       <div class="cups">${cups}</div>
       <div class="water-quick">${[100, 200, 300, 500].map((v) => `<button data-a="waterAdd" data-v="${v}">+${v}</button>`).join('')}<button data-a="glassSet" class="ghost">🥛 ${glass} мл</button></div>
     </div>
+    <div class="card act">
+      <div class="water-head"><div class="main"><b>🏃 Активность</b><div class="sub">${burned ? `сожжено ${n0(burned)} ккал` : 'тренировки и шаги'}</div></div>
+        <button class="round-btn" data-a="activity" aria-label="Добавить активность">+</button></div>
+      ${(S.data.a || []).map((a, i) => `<div class="act-row"><span>${a.e || '🏃'}</span><div class="main">${esc(a.n)}${a.min ? ` · ${a.min} мин` : ''}</div><b>−${n0(a.k)}</b><button class="link-btn" style="color:var(--danger)" data-a="actDel" data-i="${i}">✕</button></div>`).join('')}
+    </div>
     ${isToday && CFG.tips ? `<div class="card tip"><div class="ic">💡</div><div><b>Совет дня</b><p>${esc(tipOfDay())}</p></div></div>` : ''}
-    ${meals}`;
+    ${meals}
+    <div class="day-actions"><button data-a="templates">📋 Шаблоны дня</button><button data-a="weekCard">🖼 Итоги недели</button></div>`;
 }
 
 // ---------- Экран «История» ----------
@@ -538,6 +555,13 @@ function renderProfile() {
     ${CFG.achievements ? achievementsHTML(got) : ''}
     <div class="section-h"><span>Настройки</span></div>
     <div class="list">
+      <button class="row" data-a="setTarget"><div class="fic">🎯</div><div class="main"><div class="title">Цель по весу</div><div class="sub">${S.profile.target ? `${n1(S.profile.target)} кг` : 'не указана'}</div></div><span class="chev">›</span></button>
+      <button class="row" data-a="invite"><div class="fic">🤝</div><div class="main"><div class="title">Пригласить друга</div><div class="sub">${S.profile.refCount ? `приглашено: ${S.profile.refCount}` : 'ссылка-приглашение'}</div></div><span class="chev">›</span></button>
+      <button class="row" data-a="challenges"><div class="fic">🏁</div><div class="main"><div class="title">Челленджи с друзьями</div><div class="sub">вода, белок, без сладкого…</div></div><span class="chev">›</span></button>
+      <button class="row" data-a="templates"><div class="fic">📋</div><div class="main"><div class="title">Шаблоны дня</div><div class="sub">${S.templates.length ? `сохранено: ${S.templates.length}` : 'обычный день одним касанием'}</div></div><span class="chev">›</span></button>
+      <button class="row" data-a="fastToggle"><div class="fic">⏳</div><div class="main"><div class="title">Интервальное голодание</div><div class="sub">таймер и уведомление от бота</div></div><span class="switch ${S.profile.fast && S.profile.fast.on ? 'on' : ''}"><i></i></span></button>
+      ${S.profile.fast && S.profile.fast.on ? `<div class="field"><label>Режим</label><div class="seg mini">${FAST_MODES.map(([h, t]) => `<button data-a="fastMode" data-v="${h}" class="${(S.profile.fast.h || 16) === h ? 'on' : ''}">${t}</button>`).join('')}</div></div>` : ''}
+      <button class="row" data-a="addBurnToggle"><div class="fic">🔥</div><div class="main"><div class="title">Добавлять сожжённое к норме</div><div class="sub">тренировки и шаги увеличивают норму дня</div></div><span class="switch ${S.profile.addBurn !== false ? 'on' : ''}"><i></i></span></button>
       <button class="row" data-a="notif"><div class="fic">🔔</div><div class="main"><div class="title">Напоминания</div><div class="sub">Дневник, вода, вес, статистика, план</div></div><span class="chev">›</span></button>
       <div class="field"><span class="fic">🎨</span><label>Тема</label><div class="seg mini">${[['auto', 'Авто'], ['light', 'Светлая'], ['dark', 'Тёмная']].map(([v, t]) => `<button data-a="setTheme" data-v="${v}" class="${(S.profile.theme || 'auto') === v ? 'on' : ''}">${t}</button>`).join('')}</div></div>
       <div class="field"><span class="fic">🥛</span><label>Объём стакана</label><input data-p="glass" inputmode="numeric" value="${S.profile.glass || 250}"><span class="unit">мл</span></div>
@@ -545,6 +569,7 @@ function renderProfile() {
     </div>
     ${profileFormHTML(S.profile)}
     <div class="footnote">Записи хранятся в вашем облаке Telegram и видны только вам. База продуктов — встроенная (${BUILTIN.length}) и Open Food Facts (ODbL).</div>
+    <div class="credits">Разработано разработчиком <b>${esc(CFG.developer || 'Danya. Vas')}</b><br>при поддержке тестировщика <b>${esc(CFG.tester || 'Не указано')}</b></div>
     <div class="version" data-a="secret">${esc(CFG.title)} · версия ${APP_VERSION}${isAdmin() ? ' · <span data-a="openAdmin">🛠 панель</span>' : ''}</div>`;
 }
 function achievementsHTML(got) {
@@ -707,6 +732,7 @@ function addFoodSheet(meal, opts = {}) {
     const q = st.q.trim();
     if (q.length < 2 || st.loading) return;
     st.loading = true; st.error = null; update();
+    track('search');
     try { st.results = await offSearch(q); st.searched = q; }
     catch { st.error = 'Не удалось загрузить. Проверьте интернет.'; logError('off search failed'); }
     st.loading = false; update();
@@ -977,6 +1003,8 @@ const ACH = [
   { id: 'scale', i: '⚖️', t: 'На весах', d: 'Записать свой вес', ok: () => S.weights.length > 0 },
   { id: 'chef', i: '👨‍🍳', t: 'Шеф', d: 'Создать свой продукт', ok: () => S.custom.length > 0 },
   { id: 'gourmet', i: '🍱', t: 'Гурман', d: 'Попробовать 10 разных продуктов', ok: () => S.recent.length >= 10 },
+  { id: 'friend', i: '🤝', t: 'Вместе', d: 'Пригласить друга', ok: () => (S.profile.refCount || 0) > 0, pr: () => [Math.min(1, S.profile.refCount || 0), 1] },
+  { id: 'sport', i: '🏃', t: 'В движении', d: 'Добавить тренировку или шаги', ok: () => (S.data.a || []).length > 0, pr: () => [Math.min(1, (S.data.a || []).length), 1] },
   { id: 'loyal', i: '💎', t: 'Постоянство', d: 'Вести дневник 14 дней', ok: () => S.daySet.size >= 14, pr: () => [S.daySet.size, 14] },
 ];
 async function checkAchievements() {
@@ -1055,12 +1083,13 @@ function showWelcome() {
           <div><b>${n0(Math.max(0, g.kcal - t.k))}</b><span>ккал осталось</span></div>
           ${CFG.achievements ? `<div><b>${Object.keys(S.ach).length}/${ACH.length}</b><span>достижений</span></div>` : `<div><b>${n0(S.data.w)}</b><span>мл воды</span></div>`}</div>
         ${CFG.tips ? `<div class="w-tip up" ${delay(0.34)}><b>💡 Совет дня</b>${esc(tipOfDay())}</div>` : ''}`}
-    <button class="btn up" ${delay(0.42)} data-a="closeWelcome">${first ? 'Начать' : 'Открыть дневник'}</button>`;
+    <button class="btn up" ${delay(0.42)} data-a="closeWelcome">${first ? 'Начать' : 'Открыть дневник'}</button>
+    <div class="w-credits up" ${delay(0.5)}>by ${esc(CFG.developer || 'Danya. Vas')}</div>`;
   el.hidden = false;
 }
 
 // ---------- Глобальные настройки (меняются владельцем в скрытой панели) ----------
-const APP_VERSION = '4.1';
+const APP_VERSION = '5.0';
 const DEFAULT_CONFIG = {
   title: 'Калории',
   theme: 'ice',
@@ -1075,6 +1104,8 @@ const DEFAULT_CONFIG = {
   maintenance: { on: false, text: 'Скоро вернёмся — идут технические работы 🛠' },
   foods: [],
   botLink: '',
+  developer: 'Danya. Vas',
+  tester: 'Не указано',
 };
 const THEMES = [
   { id: 'ice', t: 'Лёд', c: 'linear-gradient(135deg,#2563ff,#1fc3ee)' },
@@ -1237,7 +1268,10 @@ function adminSheet() {
           : st.statsLoading ? '<div class="spinner" style="margin:6px auto"></div>'
           : s && s.ok ? `<div class="stats3 in">
               <div><b>${s.total}</b><span>всего</span></div><div><b>${s.new24}</b><span>новых за 24ч</span></div><div><b>${s.active24}</b><span>активных 24ч</span></div>
-              <div><b>${s.new7}</b><span>новых за 7д</span></div><div><b>${s.appUsers}</b><span>открывали app</span></div><div><b>${s.opens}</b><span>открытий</span></div></div>
+              <div><b>${s.new7}</b><span>новых за 7д</span></div><div><b>${s.appUsers}</b><span>открывали app</span></div><div><b>${s.opens}</b><span>открытий</span></div>
+              <div><b>${s.refs || 0}</b><span>по приглашению</span></div><div><b>${s.inactive7 || 0}</b><span>не заходили 7д</span></div><div><b>${s.blocked || 0}</b><span>заблокировали</span></div></div>
+              ${s.usage && Object.keys(s.usage).length ? `<div class="section-h" style="margin:10px 2px 6px"><span>Функции за 7 дней</span></div>${Object.entries(s.usage).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="row-flat"><span>${esc(k)}</span><b>${v}</b></div>`).join('')}` : ''}
+              <p class="hint">Рассылка по группам (неактивные, новые и др.) — командой /broadcast в боте.</p>
               ${(s.latest || []).map((x) => `<div class="row-flat"><span>${esc(x.n || 'Без имени')}${x.u ? ' @' + esc(x.u) : ''}</span><b>📱${x.o}</b></div>`).join('')}`
           : `<p class="hint" style="margin:0 0 10px">${s ? esc(s.error || 'Ошибка') : 'Нажмите, чтобы загрузить'}</p><button class="btn ghost" data-a="loadStats">Загрузить статистику</button>`}
       </div>
@@ -1253,6 +1287,8 @@ function adminSheet() {
       <div class="card"><div class="themes">${THEMES.map((t) => `<button class="theme-dot ${draft.theme === t.id ? 'on' : ''}" data-a="cfgSet" data-k="theme" data-v="${t.id}"><i style="background:${t.c}"></i>${t.t}</button>`).join('')}</div></div>
       <div class="list">
         <div class="field"><label>Название</label><input class="wide" style="text-align:right" data-cfg="title" value="${esc(draft.title)}" maxlength="24"></div>
+        <div class="field"><label>Разработчик</label><input class="wide" style="text-align:right" data-cfg="developer" value="${esc(draft.developer || '')}" maxlength="40"></div>
+        <div class="field"><label>Тестировщик</label><input class="wide" style="text-align:right" data-cfg="tester" value="${esc(draft.tester || '')}" maxlength="40"></div>
         <div class="field"><label>Ссылка на бота</label><input class="wide" style="text-align:right" data-cfg="botLink" value="${esc(draft.botLink || '')}" placeholder="https://t.me/имя_бота" maxlength="80"></div>
         <div class="field"><textarea data-cfg="welcomeText" rows="2" placeholder="Своя фраза на экране приветствия (необязательно)">${esc(draft.welcomeText)}</textarea></div>
       </div>
@@ -1416,6 +1452,7 @@ async function setWater(ml) {
   const goal = goals(S.profile).water;
   const reached = S.data.w < goal && ml >= goal;
   const delta = Math.round(ml - S.data.w);
+  if (delta > 0) track('water');
   S.popCup = ml > S.data.w;
   S.data.w = Math.max(0, Math.min(10000, ml));
   if (delta) { S.data.wl = [...(S.data.wl || []), [Date.now(), delta]].slice(-40); }
@@ -1464,6 +1501,7 @@ const actions = {
     else checkAchievements();
   },
   async copyMeal(d) {
+    track('copy');
     const items = S.prev.e.filter((e) => e.m === d.m);
     const now = Date.now();
     items.forEach((e, i) => S.data.e.push({ ...e, t: now + i }));
@@ -1479,6 +1517,7 @@ const actions = {
     S.weights = S.weights.filter((x) => x[0] !== today).concat([[today, kg]]).sort((a, b) => (a[0] < b[0] ? -1 : 1));
     while (JSON.stringify(S.weights).length > 4000) S.weights.shift();
     S.profile.weight = kg;
+    track('weight');
     haptic('success');
     render();
     toast('Вес записан');
@@ -1536,11 +1575,14 @@ async function init() {
     try { tg.BackButton.onClick(() => { if (sheets.length) closeSheet(); }); } catch {}
   }
   $('#app').innerHTML = '<div class="empty"><div class="spinner" style="margin:0 auto"></div></div>';
-  const [v, keys] = await Promise.all([Store.get(['profile', 'recent', 'custom', 'weights', 'ach', 'shop', 'chat']), Store.keys()]);
+  const [v, keys] = await Promise.all([Store.get(['profile', 'recent', 'custom', 'weights', 'ach', 'shop', 'chat', 'meas']), Store.keys()]);
+  S.meas = parse(v.meas, []);
   S.daySet = new Set(keys.filter((k) => /^d_\d{8}$/.test(k)));
   S.ach = parse(v.ach, {});
   S.shop = parse(v.shop, {});
   S.chat = parse(v.chat, []);
+  const tplKeys = keys.filter((k) => k.startsWith('tp_'));
+  if (tplKeys.length) { const tv = await Store.get(tplKeys); S.templates = tplKeys.map((k) => parse(tv[k], null)).filter(Boolean).sort((a, b) => (b.id > a.id ? 1 : -1)); }
   const dishKeys = keys.filter((k) => k.startsWith('ds_'));
   if (dishKeys.length) { const dv = await Store.get(dishKeys); S.dishes = dishKeys.map((k) => parse(dv[k], null)).filter(Boolean).sort((a, b) => (b.id > a.id ? 1 : -1)); }
   S.profile = { ...DEFAULT_PROFILE, ...parse(v.profile, {}) };
@@ -1555,7 +1597,12 @@ async function init() {
   await Promise.all([loadDay(new Date()), loadServerConfig(2500)]);
   if (CFG.maintenance.on && !isAdmin()) return showMaintenance();
   render();
-  if (CFG.welcome || !S.profile.onboarded) showWelcome();
+  const deep = location.hash && location.hash.length > 1;
+  if (!deep && (CFG.welcome || !S.profile.onboarded)) showWelcome();
+  else if (deep && !S.profile.onboarded) showWelcome();
+  if (deep && S.profile.onboarded) handleDeepLink().catch((e) => logError('deeplink ' + e));
+  updateTodaySummary();
+  if (API_URL && inTelegram) loadChallenges().then(() => autoMarkChallenges()).catch(() => {});
   // Повторная проверка при возвращении в приложение и раз в минуту.
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshConfig(); });
   setInterval(refreshConfig, 60000);

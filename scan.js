@@ -51,6 +51,7 @@ function scannerSheet(meal, opts = {}) {
     if (st.done || !validCode(code)) return;
     st.done = true;
     if (st.stop) st.stop();
+    track('scan');
     haptic('success');
     sheets.pop();
     openSheet(barcodeSheet(meal, String(code).trim(), opts));

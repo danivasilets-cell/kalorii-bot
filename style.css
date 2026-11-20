@@ -637,3 +637,45 @@ label.qbtn span { font-size: 24px; } label.qbtn small { color: var(--hint); font
 .seg.units button { padding: 8px 12px; min-width: 44px; }
 .field.pcw input { width: 70px; }
 .qty-eq { text-align: right; padding: 0 18px 10px; color: var(--hint); font-weight: 700; font-size: 13px; margin-top: -4px; }
+
+/* =========================================================
+   v5: подсказки, голодание, активность, челленджи, темп, замеры, карточка недели
+   ========================================================= */
+.suggest .sg-h, .chal-mini .sg-h { font-size: 14px; font-weight: 700; margin-bottom: 10px; }
+.suggest .sg-h b { color: var(--accent); }
+.sg-list { display: flex; gap: 8px; overflow-x: auto; margin: 0 -16px; padding: 0 16px 2px; scrollbar-width: none; }
+.sg-list::-webkit-scrollbar { display: none; }
+.sg-list button { flex: 0 0 150px; border: 0; border-radius: 18px; background: var(--card2); padding: 10px 12px; text-align: left; display: flex; flex-direction: column; gap: 3px; }
+.sg-list span { font-size: 22px; } .sg-list b { font-size: 13.5px; line-height: 1.25; } .sg-list small { font-size: 11.5px; color: var(--hint); font-weight: 700; }
+.fast { display: flex; align-items: center; gap: 12px; }
+.fast .main { flex: 1; min-width: 0; } .fast b { display: block; font-size: 14.5px; } .fast small { color: var(--hint); font-weight: 600; font-size: 12.5px; }
+.fring { position: relative; width: 54px; height: 54px; flex: none; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--card2); }
+.fring svg { position: absolute; inset: 0; } .fring span { font-size: 20px; position: relative; }
+.act-row { display: flex; align-items: center; gap: 10px; padding: 8px 0 0; font-weight: 600; font-size: 14px; }
+.act-row .main { flex: 1; } .act-row b { color: #19b36b; }
+.day-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 18px; }
+.day-actions button { border: 1px solid var(--glass-border); background: var(--glass); box-shadow: var(--shadow); border-radius: 18px; padding: 13px 8px; font-weight: 800; font-size: 14px; color: var(--accent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+.burn-res { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; } .burn-res span { font-size: 22px; } .burn-res b { font: 700 30px var(--font-display); color: #ff7a45; } .burn-res small { color: var(--hint); font-weight: 600; width: 100%; }
+.chal-row { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: none; padding: 6px 0; text-align: left; }
+.chal-row > span { font-size: 22px; } .chal-row .main { flex: 1; } .chal-row b { display: block; font-size: 14px; } .chal-row small { color: var(--hint); font-size: 12px; font-weight: 600; }
+.chal-row em { font-style: normal; width: 28px; height: 28px; border-radius: 10px; background: var(--card2); display: flex; align-items: center; justify-content: center; color: var(--hint); font-weight: 800; }
+.chal-row em.ok { background: var(--grad); color: #fff; }
+.chal-h { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; } .chal-h > span { font-size: 30px; } .chal-h b { display: block; font: 700 16px var(--font-display); } .chal-h small { color: var(--hint); font-weight: 600; }
+.board > div { display: grid; grid-template-columns: 26px 1fr 80px 40px; align-items: center; gap: 8px; padding: 5px 0; font-size: 14px; }
+.board > div.me b { color: var(--accent); } .board .bar { margin: 0; } .board em { font-style: normal; font-weight: 800; text-align: right; color: var(--hint); }
+.chal-act { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.pace .pace-h { display: flex; justify-content: space-between; align-items: center; }
+.pace-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.pace-row div { background: var(--card2); border-radius: 14px; padding: 9px 10px; } .pace-row span { display: block; font-size: 11.5px; color: var(--hint); font-weight: 700; } .pace-row b { font: 700 15px var(--font-display); }
+.meas-in { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.meas-in label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; color: var(--hint); }
+.meas-in input { width: 100%; border: 0; border-radius: 12px; background: var(--card2); padding: 10px 6px; text-align: center; font: 700 16px var(--font-display); color: var(--text); outline: none; }
+.meas-list { margin-top: 12px; } .meas-row { display: grid; grid-template-columns: 70px 1fr 54px 44px; align-items: center; gap: 8px; padding: 4px 0; font-size: 14px; font-weight: 700; }
+.meas-row span { color: var(--hint); } .meas-row small { font-size: 12px; text-align: right; } .meas-row small.down { color: #19b36b; } .meas-row small.up { color: var(--fat); }
+.spark { width: 100%; height: 30px; }
+.ref span { display: block; font-size: 12px; color: var(--hint); font-weight: 700; } .ref b { display: block; word-break: break-all; font-size: 15px; margin: 4px 0 6px; } .ref small { color: var(--hint); font-weight: 600; }
+.week-img { width: 100%; border-radius: 24px; box-shadow: var(--shadow-strong); margin-bottom: 14px; display: block; }
+.unit-btn { border: 0; border-radius: 10px; background: var(--grad-soft); color: var(--accent); font-weight: 800; padding: 7px 9px; min-width: 40px; }
+.credits { text-align: center; color: var(--hint); font-size: 12.5px; font-weight: 600; line-height: 1.5; padding: 4px 0 2px; }
+.credits b { color: var(--text); }
+#welcome .w-credits { text-align: center; font-size: 12px; font-weight: 700; opacity: .55; margin-top: 12px; }

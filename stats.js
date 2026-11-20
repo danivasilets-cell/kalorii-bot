@@ -152,6 +152,7 @@ function renderStats() {
     <div class="card">${macroChart(days)}
       ${mBar('Белки', pAvg, g.protein, 'var(--prot)')}${mBar('Жиры', fAvg, g.fat, 'var(--fat)')}${mBar('Углеводы', cAvg, g.carbs, 'var(--carb)')}</div>
 
+    ${paceHTML()}
     <div class="section-h"><span>Вес</span><span>${last ? n1(last[1]) + ' кг' : ''}</span></div>
     <div class="card">
       <div class="weight-add"><input id="newWeight" inputmode="decimal" placeholder="${n1(last ? last[1] : S.profile.weight)}"><span>кг</span><button class="btn" data-a="addWeight">Записать</button></div>
@@ -162,6 +163,7 @@ function renderStats() {
       <div class="list">${ws.map((w, i) => { const d = ws[i + 1] ? w.avg - ws[i + 1].avg : null; return `<div class="row"><div class="main"><div class="title">Неделя с ${dateText(w.start)}</div><div class="sub">${w.n} ${plural(w.n, 'взвешивание', 'взвешивания', 'взвешиваний')}</div></div>
         <div class="val">${n1(w.avg)} кг ${d != null ? `<small class="${d > 0 ? 'up' : 'down'}">${d > 0 ? '▲' : '▼'} ${n1(Math.abs(d))}</small>` : ''}</div></div>`; }).join('')}</div>` : ''}
 
+    ${measHTML()}
     <div class="section-h"><span>Вода</span><span>цель ${n0(g.water)} мл</span></div>
     <div class="card">${barChart(days.map((d) => d.w), { goal: g.water, labels, color: 'url(#gWater)', overColor: 'url(#gWater)', unit: 'мл' })}</div>
 
@@ -177,6 +179,7 @@ function renderStats() {
     <div class="list">
       <button class="row" data-a="exportCsv"><div class="fic">📊</div><div class="main"><div class="title">Экспорт в Excel (CSV)</div><div class="sub">Файл придёт в чат с ботом</div></div></button>
       <button class="row" data-a="exportReport"><div class="fic">📄</div><div class="main"><div class="title">Отчёт для печати / PDF</div><div class="sub">Откройте файл и выберите «Печать → Сохранить как PDF»</div></div></button>
+      <button class="row" data-a="weekCard"><div class="fic">🖼</div><div class="main"><div class="title">Карточка недели</div><div class="sub">Красивая картинка для сторис и чатов</div></div></button>
       <button class="row" data-a="shareStats"><div class="fic">🔗</div><div class="main"><div class="title">Поделиться статистикой</div><div class="sub">Отправить итоги другу в Telegram</div></div></button>
     </div>`;
 }
@@ -244,7 +247,7 @@ async function buildReport(n) {
 
 Object.assign(actions, {
   period(d) { S.statPeriod = +d.v; haptic(); render(); },
-  async exportCsv() { const n = S.statPeriod || 30; await exportFile(`kalorii_${isoDate(new Date())}.csv`, await buildCsv(Math.max(n, 30)), '📊 Дневник питания (откройте в Excel или Google Таблицах)'); },
+  async exportCsv() { track('export'); const n = S.statPeriod || 30; await exportFile(`kalorii_${isoDate(new Date())}.csv`, await buildCsv(Math.max(n, 30)), '📊 Дневник питания (откройте в Excel или Google Таблицах)'); },
   async exportReport() { await exportFile(`otchet_${isoDate(new Date())}.html`, await buildReport(S.statPeriod || 30), '📄 Отчёт: откройте файл и нажмите «Печать → Сохранить как PDF»'); },
   async shareStats() {
     const days = await loadDays(7);

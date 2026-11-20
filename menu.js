@@ -66,6 +66,7 @@ function dishEditorSheet(dish) {
         if (!d.ing.length) return toast('Добавьте хотя бы один ингредиент');
         d.n = d.n.trim();
         await saveDish(d);
+        track('dish');
         haptic('success'); toast('⭐ Блюдо сохранено');
         closeSheet(); if (!sheets.length) render();
       }),
@@ -156,6 +157,7 @@ function planPickSheet(item) {
         const list = await loadPlan(st.day);
         list.push({ ...item, id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), m: st.m, sv: st.sv });
         await savePlan(st.day, list);
+        track('plan');
         haptic('success'); toast(`🗓 Добавлено в план: ${dayTitle(st.day).toLowerCase()}`);
         closeSheet();
         if (S.tab === 'menu') render();
@@ -264,7 +266,7 @@ function renderMenu() {
 Object.assign(actions, {
   menuTab(d) { S.menuTab = d.v || d.x; if (S.menuTab === 'shop') S.shopList = null; haptic(); render(); window.scrollTo(0, 0); },
   rFilter(d) { S.recipeFilter = d.v; haptic(); render(); },
-  openRecipe(d) { openSheet(recipeSheet(recipeById(d.id))); },
+  openRecipe(d) { track('recipe'); openSheet(recipeSheet(recipeById(d.id))); },
   dishNew() { openSheet(dishEditorSheet(null)); },
   dishOpen(d, el, ev) { openSheet(dishEditorSheet(S.dishes.find((x) => x.id === d.id))); },
   dishEat(d) { const x = S.dishes.find((y) => y.id === d.id); if (x) openSheet(amountSheet(dishAsFood(x), suggestedMeal())); },

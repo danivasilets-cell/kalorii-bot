@@ -47,7 +47,7 @@ function mealMenuSheet(m) {
           await Store.set(k, JSON.stringify(d));
           S.daySet.add(k); S.strip.set(k, totalsOf(d.e).k); S.daysCache = null;
         }
-        haptic('success'); toast(`Скопировано на ${dayTitle(st.target).toLowerCase()}`); closeSheet(); render();
+        track('copy'); haptic('success'); toast(`Скопировано на ${dayTitle(st.target).toLowerCase()}`); closeSheet(); render();
       }),
     },
   };
@@ -96,7 +96,7 @@ const REMINDER_TYPES = [
   ['diary', '📝', 'Заполнить дневник', 'Вечером, если забыли записать еду'],
   ['water', '💧', 'Выпить воды', 'До 3 раз в день'],
   ['weight', '⚖️', 'Внести вес', 'Раз в неделю'],
-  ['stats', '📊', 'Статистика дня', 'Сколько осталось до нормы'],
+  ['stats', '📊', 'Итог дня', 'Калории, белок и вода за день — вечером'],
   ['plan', '🗓', 'План питания', 'Посмотреть меню на завтра'],
 ];
 const DEFAULT_REM = { diary: { on: false, t: '20:30' }, water: { on: false, ts: ['11:00', '15:00', '18:00'] }, weight: { on: false, t: '08:30', dow: 1 }, stats: { on: false, t: '21:30' }, plan: { on: false, t: '19:00' } };

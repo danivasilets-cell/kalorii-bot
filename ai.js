@@ -95,13 +95,23 @@ function resolveItems(items) {
     let g = it.grams || 0;
     if (it.count && (!g || it.count > 1 && food.s && Math.abs(g - it.count * food.s) > g * 0.5)) g = it.count * (food.s || 100);
     if (!g) g = food.s || 100;
-    return { name: it.name, food, g: Math.round(g), src, meal: it.meal };
+    return { name: it.name, food, g: Math.round(g), src, meal: it.meal, cnt: it.count && food.s ? it.count : 0 };
   });
 }
 
 // ---------- Экран проверки распознанного ----------
 function reviewSheet(items, meal, source) {
   const st = { meal: meal || (items.find((x) => x.meal) || {}).meal || suggestedMeal() };
+  // Единица для каждой позиции: штуки, если назвали количество, мл — для напитков, иначе граммы.
+  const initUnit = (x) => {
+    if (!x.food) { x.u = 'г'; x.q = x.g; return; }
+    x.pcw = pieceWeight(x.food) || 0;
+    if (x.cnt && x.pcw) { x.u = 'шт'; x.q = x.cnt; x.g = x.q * x.pcw; }
+    else if (isLiquid(x.food)) { x.u = 'мл'; x.q = Math.round(x.g / density(x.food)); }
+    else { x.u = 'г'; x.q = x.g; }
+  };
+  items.forEach(initUnit);
+  const regram = (x) => { x.g = Math.round(x.q * unitFactor(x.food || {}, x.u, x.pcw) * 10) / 10; };
   const tot = () => items.filter((x) => x.food).reduce((a, x) => { const v = per(x.food, x.g); a.k += v.k; a.p += v.p; a.f += v.f; a.c += v.c; return a; }, { k: 0, p: 0, f: 0, c: 0 });
   return {
     title: source === 'photo' ? 'Распознано на фото' : 'Проверьте продукты',
@@ -111,7 +121,7 @@ function reviewSheet(items, meal, source) {
         return `<div class="row rv"><div class="fic">${x.food ? catEmoji(x.food) : '❓'}</div>
           <div class="main"><button class="rv-name" data-a="rvReplace" data-i="${i}">${esc(x.food ? x.food.n : x.name)} <span>✎</span></button>
             <div class="sub">${v ? `${n0(v.k)} ккал · Б ${n1(v.p)} Ж ${n1(v.f)} У ${n1(v.c)}` : 'не найдено — нажмите, чтобы выбрать'}${x.src === 'ai' ? ' · <em>оценка ИИ</em>' : ''}</div></div>
-          <input class="gram-in" data-rg="${i}" inputmode="decimal" value="${n0(x.g)}"><span class="unit">г</span>
+          <input class="gram-in" data-rg="${i}" inputmode="decimal" value="${n1(x.q)}"><button class="unit-btn" data-a="rvUnit" data-i="${i}">${UNIT_LABEL[x.u]}</button>
           <button class="link-btn" style="color:var(--danger)" data-a="rvDel" data-i="${i}" aria-label="Удалить">✕</button></div>`;
       }).join('')}</div>` : '<div class="card"><p class="hint" style="margin:0">Ничего не распознано. Добавьте продукт вручную.</p></div>'}
       <div class="list"><button class="row add" data-a="rvAdd"><span class="plus">+</span>Добавить продукт</button></div>
@@ -120,23 +130,31 @@ function reviewSheet(items, meal, source) {
       <button class="btn" data-a="rvSave" ${items.some((x) => x.food) ? '' : 'disabled'}>Добавить в дневник</button>`,
     mount(el) {
       el.querySelectorAll('[data-rg]').forEach((inp) => inp.addEventListener('input', () => {
-        items[+inp.dataset.rg].g = num(inp.value);
+        const x = items[+inp.dataset.rg]; x.q = num(inp.value); regram(x);
         el.querySelector('#rvTot').innerHTML = totalsHTML(tot());
       }));
     },
     actions: {
       meal(d) { st.meal = d.m; refreshSheet(); },
       rvDel(d) { items.splice(+d.i, 1); haptic(); refreshSheet(); },
+      rvUnit(d) {
+        const x = items[+d.i];
+        if (!x.food) return;
+        const us = unitsFor(x.food).filter((u) => u !== 'шт' || pieceWeight(x.food));
+        const st2 = { u: x.u, q: x.q, pcw: x.pcw || pieceWeight(x.food) };
+        switchUnit(x.food, st2, us[(us.indexOf(x.u) + 1) % us.length]);
+        Object.assign(x, st2); regram(x); haptic(); refreshSheet();
+      },
       rvReplace(d) {
         const it = items[+d.i];
-        openSheet(addFoodSheet(st.meal, { query: it.food ? it.food.n : it.name, pick: (food, g) => { it.food = plainFood(food); it.g = g; it.src = 'db'; sheets.splice(sheets.length - 2, 2); renderSheet(); } }));
+        openSheet(addFoodSheet(st.meal, { query: it.food ? it.food.n : it.name, pick: (food, g) => { it.food = plainFood(food); it.g = g; it.src = 'db'; it.cnt = 0; initUnit(it); sheets.splice(sheets.length - 2, 2); renderSheet(); } }));
       },
-      rvAdd() { openSheet(addFoodSheet(st.meal, { pick: (food, g) => { items.push({ name: food.n, food: plainFood(food), g, src: 'db' }); sheets.splice(sheets.length - 2, 2); renderSheet(); } })); },
+      rvAdd() { openSheet(addFoodSheet(st.meal, { pick: (food, g) => { const it = { name: food.n, food: plainFood(food), g, src: 'db' }; initUnit(it); items.push(it); sheets.splice(sheets.length - 2, 2); renderSheet(); } })); },
       rvSave: lock(async () => {
         const ok = items.filter((x) => x.food && x.g > 0);
         if (!ok.length) return toast('Нет продуктов для добавления');
         const now = Date.now();
-        ok.forEach((x, i) => S.data.e.push({ ...plainFood(x.food), g: x.g, m: st.meal, t: now + i }));
+        ok.forEach((x, i) => S.data.e.push({ ...plainFood(x.food), g: x.g, m: st.meal, t: now + i, u: x.u === 'г' ? undefined : x.u, q: x.u === 'г' ? undefined : x.q }));
         for (const x of ok) await remember(x.food, x.g);
         S.profile.added = (S.profile.added || 0) + ok.length;
         haptic('success'); closeAllSheets(); render(); toast(`Добавлено: ${ok.length}`);
@@ -186,6 +204,7 @@ function photoSheet(meal) {
         st.busy = false;
         if (!r.ok) { st.error = r.error || 'Не удалось распознать'; return refreshSheet(); }
         haptic('success');
+        track('photo');
         sheets.pop();
         openSheet(reviewSheet(resolveItems(r.items || []), meal, 'photo'));
       }));
@@ -231,6 +250,7 @@ function voiceSheet(meal) {
     const r = await aiCall('/api/ai/parse', { text });
     if (r.ok && r.items && r.items.length) items = r.items;
     if (!items) items = localParse(text);
+    track('voice');
     st.busy = false;
     sheets.pop();
     openSheet(reviewSheet(resolveItems(items), meal, 'voice'));
@@ -308,6 +328,7 @@ async function askAI(text) {
   if (!text || S.chatBusy) return;
   S.chat = [...(S.chat || []), { role: 'user', content: text }];
   S.chatDraft = ''; S.chatBusy = true; render();
+  track('chat');
   const r = await aiCall('/api/ai/chat', { messages: S.chat.slice(-8), context: await aiContext() });
   S.chatBusy = false;
   S.chat.push({ role: 'assistant', content: r.ok ? r.answer : `⚠️ ${r.error || 'Ошибка'}` });

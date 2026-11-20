@@ -28,7 +28,8 @@ export default {
     if (url.pathname === '/api/config' && req.method === 'POST') return cors(await apiSaveConfig(req, env));
     if (url.pathname === '/api/stats' && req.method === 'POST') return cors(await apiStats(req, env));
     if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
-      const routes = { '/api/ai/photo': apiAiPhoto, '/api/ai/parse': apiAiParse, '/api/ai/voice': apiAiVoice, '/api/ai/chat': apiAiChat, '/api/reminders': apiReminders, '/api/export': apiExport, '/api/log': apiLog };
+      const routes = { '/api/ai/photo': apiAiPhoto, '/api/ai/parse': apiAiParse, '/api/ai/voice': apiAiVoice, '/api/ai/chat': apiAiChat, '/api/reminders': apiReminders, '/api/export': apiExport, '/api/log': apiLog,
+        '/api/sync': apiSync, '/api/pending': apiPending, '/api/fast': apiFast, '/api/ref': apiRef, '/api/challenge': apiChallenge, '/api/share-photo': apiSharePhoto };
       const fn = routes[url.pathname];
       if (fn) {
         try { return cors(await fn(req, env)); }
@@ -54,7 +55,8 @@ export default {
     ctx.waitUntil((async () => {
       // Бесплатный план — до 50 внешних запросов за запуск: сначала напоминания, остаток — рассылке.
       let used = 0;
-      try { used = await processReminders(env, 45); } catch (e) { console.log('reminders error', e && e.stack); }
+      try { used = await processOneOff(env, 20); } catch (e) { console.log('one-off error', e && e.stack); }
+      try { used += await processReminders(env, 45 - used); } catch (e) { console.log('reminders error', e && e.stack); }
       try { if (used < 40) await processBroadcast(env, 45 - used); } catch (e) { console.log('broadcast error', e && e.stack); }
     })());
   },
@@ -130,10 +132,18 @@ async function handleUpdate(u, env, ctx) {
 
   if (cmd === '/start') {
     const res = await touchUser(env, from);
+    if (res && res.isNew && arg.startsWith('ref_')) await registerReferral(env, from, arg.slice(4));
+    if (arg.startsWith('ch_')) {
+      await send(env, from.id, '🏁 Вас пригласили в челлендж! Откройте приложение, чтобы присоединиться 👇',
+        { reply_markup: { inline_keyboard: [[{ text: '🏁 Присоединиться', web_app: { url: appUrl(env) + '#ch_' + arg.slice(3).replace(/[^a-z0-9]/g, '') } }]] } });
+      if (res && res.isNew && env.OWNER_ID && !isOwner(env, from.id)) await send(env, env.OWNER_ID, `🆕 Новый пользователь (челлендж): ${userLabel(res.m)} (<code>${from.id}</code>)`);
+      return;
+    }
     await send(env, from.id,
       `👋 Привет, <b>${esc(from.first_name || '')}</b>!\n\n` +
       `Я помогу считать калории, белки, жиры и углеводы.\n\n` +
-      `🥗 Дневник питания по приёмам пищи\n💧 Учёт воды\n⚖️ График веса\n📊 История и статистика\n\n` +
+      `🥗 Дневник питания, рецепты и план\n📷 Распознавание еды по фото\n🎙 Голосовой ввод\n💧 Вода, ⚖️ вес и 📊 статистика\n\n` +
+      `💡 Можно прямо сюда отправить голосовое «съел два яйца и кофе» или написать <code>+ банан и йогурт</code> — я разберу и предложу добавить.\n\n` +
       `Нажмите кнопку ниже, чтобы открыть дневник. Ваши записи видны только вам.`,
       { reply_markup: openAppKeyboard(env) });
     if (res && res.isNew && env.OWNER_ID && !isOwner(env, from.id)) {
@@ -147,10 +157,18 @@ async function handleUpdate(u, env, ctx) {
       `ℹ️ <b>Как пользоваться</b>\n\n` +
       `1. Откройте дневник кнопкой ниже или кнопкой «Открыть» слева от поля ввода.\n` +
       `2. При первом запуске заполните анкету — приложение посчитает вашу норму.\n` +
-      `3. Добавляйте еду в завтрак, обед, ужин и перекусы.\n\n` +
-      `Есть вопрос или идея? Просто напишите сюда сообщение — его прочитает автор.`,
+      `3. Добавляйте еду в завтрак, обед, ужин и перекусы.\n` +
+      `4. Или пришлите сюда голосовое / сообщение с «+»: <code>+ 2 яйца и 100 г гречки на обед</code>\n\n` +
+      `Есть вопрос или идея? Просто напишите сюда сообщение — его прочитает автор.\n\n` +
+      `👨‍💻 Разработано разработчиком <b>Danya. Vas</b> при поддержке тестировщика <b>Не указано</b>.`,
       { reply_markup: openAppKeyboard(env) });
     return;
+  }
+
+  const foodText = text.startsWith('+') ? text.slice(1).trim() : cmd === '/add' ? arg : '';
+  if (msg.voice || msg.audio || foodText) {
+    await touchUser(env, from);
+    return handleFoodMessage(env, msg, foodText);
   }
 
   if (isOwner(env, from.id)) {
@@ -214,7 +232,9 @@ async function ownerCommand(env, msg, cmd, arg, ctx) {
         `🔥 Активных за 7 дней: <b>${c((u) => now - (u.m.s || 0) < 7 * day)}</b>\n\n` +
         `📱 Открывали приложение: <b>${c((u) => (u.m.o || 0) > 0)}</b> чел.\n` +
         `📱 Всего открытий: <b>${users.reduce((s, u) => s + (u.m.o || 0), 0)}</b>\n` +
-        `🚫 Заблокировали бота: <b>${c((u) => u.m.b)}</b>` +
+        `🚫 Заблокировали бота: <b>${c((u) => u.m.b)}</b>\n` +
+        `🤝 Пришли по приглашению: <b>${c((u) => u.m.r)}</b>\n\n` +
+        `🧩 <b>Функции за 7 дней</b>\n${Object.entries(await usageLastDays(env, 7)).filter(([k]) => FEATURE_NAMES[k]).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${FEATURE_NAMES[k]}: ${v}`).join('\n') || 'пока нет данных'}` +
         (job ? `\n\n📣 Идёт рассылка: ${job.i}/${job.ids.length}` : ''));
       return true;
     }
@@ -245,9 +265,11 @@ async function ownerCommand(env, msg, cmd, arg, ctx) {
       await send(env, me, '👇 Так увидят сообщение пользователи:');
       if (draft.text) await send(env, me, draft.text);
       else await tg(env, 'copyMessage', { chat_id: me, from_chat_id: me, message_id: draft.copy });
-      await send(env, me, `Отправить <b>${total}</b> пользователям?`, {
-        reply_markup: { inline_keyboard: [[{ text: '✅ Отправить', callback_data: 'bc:go' }, { text: '✖️ Отмена', callback_data: 'bc:no' }]] },
-      });
+      const users = (await allUsers(env)).filter((u) => !u.m.b && !isOwner(env, u.id));
+      const now = Date.now();
+      const rows = Object.entries(SEGMENTS).map(([k, [t, f]]) => [{ text: `📣 ${t} (${users.filter((u) => f(u, now)).length})`, callback_data: 'bc:go:' + k }]);
+      rows.push([{ text: '✖️ Отмена', callback_data: 'bc:no' }]);
+      await send(env, me, `Кому отправить? Всего доступно: <b>${total}</b>`, { reply_markup: { inline_keyboard: rows } });
       return true;
     }
 
@@ -282,17 +304,19 @@ async function handleCallback(q, env, ctx) {
   if (q.data === 'bc:no') {
     await env.DB.delete('bc:draft');
     await edit('✖️ Рассылка отменена');
-  } else if (q.data === 'bc:go') {
+  } else if (q.data.startsWith('bc:go')) {
+    const seg = SEGMENTS[q.data.split(':')[2] || 'all'] || SEGMENTS.all;
     const draft = await env.DB.get('bc:draft', 'json');
     if (!draft) {
       await edit('⌛ Черновик устарел — отправьте /broadcast заново');
     } else if (await env.DB.get('bc:job')) {
       await edit('⏳ Уже идёт рассылка');
     } else {
-      const ids = (await allUsers(env)).filter((u) => !u.m.b && !isOwner(env, u.id)).map((u) => u.id);
+      const now = Date.now();
+      const ids = (await allUsers(env)).filter((u) => !u.m.b && !isOwner(env, u.id) && seg[1](u, now)).map((u) => u.id);
       await env.DB.put('bc:job', JSON.stringify({ draft, from: me, ids, i: 0, ok: 0, fail: 0 }));
       await env.DB.delete('bc:draft');
-      await edit(`🚀 Рассылка запущена: ${ids.length} получателей. По ${BATCH} сообщений в минуту — пришлю отчёт.`);
+      await edit(`🚀 Рассылка «${seg[0]}» запущена: ${ids.length} получателей. По ${BATCH} сообщений в минуту — пришлю отчёт.`);
       await processBroadcast(env);
     }
   }
@@ -371,6 +395,9 @@ async function apiStats(req, env) {
     appUsers: c((u) => (u.m.o || 0) > 0),
     opens: users.reduce((s, u) => s + (u.m.o || 0), 0),
     blocked: c((u) => u.m.b),
+    refs: c((u) => u.m.r),
+    usage: Object.fromEntries(Object.entries(await usageLastDays(env, 7)).filter(([k]) => FEATURE_NAMES[k]).map(([k, v]) => [FEATURE_NAMES[k], v])),
+    inactive7: c((u) => now - (u.m.s || 0) > 7 * day),
     latest: users.sort((a, b) => (b.m.j || 0) - (a.m.j || 0)).slice(0, 10).map((u) => ({ id: u.id, n: u.m.n, u: u.m.u, j: u.m.j, o: u.m.o || 0 })),
   });
 }
@@ -632,7 +659,7 @@ const REMINDER_TEXT = {
   diary: '📝 Не забудьте записать еду в дневник — это займёт минуту.',
   water: '💧 Время выпить стакан воды!',
   weight: '⚖️ Сегодня день взвешивания. Запишите вес — утром натощак честнее всего.',
-  stats: '📊 Загляните в статистику дня: сколько осталось до нормы?',
+  stats: '📊 Итог дня',
   plan: '🗓 Посмотрите план питания на завтра.',
 };
 const toUtc = (hhmm, tz) => {
@@ -691,7 +718,13 @@ async function processReminders(env, budget) {
         const local = new Date(now.getTime() - ((rs && rs.tz) || 0) * 60000);
         if (rs && rs.items.weight && local.getUTCDay() !== (rs.items.weight.dow % 7)) continue;
       }
-      const r = await send(env, uid, REMINDER_TEXT[type], { reply_markup: openAppKeyboard(env, '🥗 Открыть дневник'), disable_notification: false });
+      let text = REMINDER_TEXT[type];
+      if (type === 'stats') {
+        const rs = await env.DB.get(`rs:${uid}`, 'json');
+        const sm = await env.DB.get(`sm:${uid}`, 'json');
+        text = sm && sm.date === today8((rs && rs.tz) || 0) && sm.e > 0 ? summaryText(sm) : '📝 Сегодня в дневнике пока пусто. Запишите, что ели, — это займёт минуту 🙂';
+      }
+      const r = await send(env, uid, text, { reply_markup: openAppKeyboard(env, '🥗 Открыть дневник'), disable_notification: false });
       used++;
       if (!r.ok && r.error_code === 403) console.log('reminder blocked', uid);
     }
@@ -724,3 +757,260 @@ async function apiLog(req) {
   } catch {}
   return json({ ok: true });
 }
+
+// =====================================================================
+//  v5: итог дня, еда голосом/текстом в чате, голодание, приглашения,
+//      челленджи, отправка картинки, использование функций
+// =====================================================================
+const today8 = (tz = 0) => new Date(Date.now() - tz * 60000).toISOString().slice(0, 10);
+
+// ---------- Синхронизация итогов дня и статистики функций ----------
+const FEATURES = ['search', 'photo', 'voice', 'scan', 'chat', 'recipe', 'plan', 'dish', 'water', 'weight', 'template', 'activity', 'fast', 'measure', 'challenge', 'share', 'export', 'copy'];
+async function apiSync(req, env) {
+  const { error, body, user } = await userFromBody(req, env, 20000);
+  if (error) return error;
+  const uid = String(user.id);
+  const d = body.day;
+  if (d && /^\d{4}-\d{2}-\d{2}$/.test(d.date || '')) {
+    const n = (x, max) => Math.max(0, Math.min(max, Math.round(Number(x) || 0)));
+    const sm = { date: d.date, k: n(d.k, 20000), p: n(d.p, 2000), f: n(d.f, 2000), c: n(d.c, 3000), w: n(d.w, 15000), e: n(d.e, 500),
+      gk: n(d.gk, 10000), gp: n(d.gp, 1000), gw: n(d.gw, 10000), burn: n(d.burn, 10000) };
+    const old = await env.DB.get(`sm:${uid}`);
+    if (old !== JSON.stringify(sm)) await env.DB.put(`sm:${uid}`, JSON.stringify(sm), { expirationTtl: 3 * 86400 });
+  }
+  const usage = body.usage || {};
+  const inc = Object.fromEntries(Object.entries(usage).filter(([k, v]) => FEATURES.includes(k) && Number(v) > 0).map(([k, v]) => [k, Math.min(200, Math.round(Number(v)))]));
+  if (Object.keys(inc).length) {
+    const key = `us:${today8()}`;
+    const cur = (await env.DB.get(key, 'json')) || {};
+    for (const [k, v] of Object.entries(inc)) cur[k] = (cur[k] || 0) + v;
+    cur._sessions = (cur._sessions || 0) + 1;
+    await env.DB.put(key, JSON.stringify(cur), { expirationTtl: 40 * 86400 });
+  }
+  return json({ ok: true });
+}
+async function usageLastDays(env, days = 7) {
+  const tot = {};
+  for (let i = 0; i < days; i++) {
+    const d = new Date(Date.now() - i * 86400e3).toISOString().slice(0, 10);
+    const u = await env.DB.get(`us:${d}`, 'json');
+    if (u) for (const [k, v] of Object.entries(u)) tot[k] = (tot[k] || 0) + v;
+  }
+  return tot;
+}
+const FEATURE_NAMES = { search: 'Поиск', photo: 'Фото', voice: 'Голос', scan: 'Штрихкод', chat: 'ИИ-помощник', recipe: 'Рецепты', plan: 'План', dish: 'Блюда', water: 'Вода', weight: 'Вес', template: 'Шаблоны дня', activity: 'Активность', fast: 'Голодание', measure: 'Замеры', challenge: 'Челленджи', share: 'Поделиться', export: 'Экспорт', copy: 'Копирование' };
+
+/** Персональный итог дня для вечернего напоминания. */
+function summaryText(sm) {
+  const goal = (sm.gk || 0) + (sm.burn || 0);
+  const pct = goal ? Math.round((sm.k / goal) * 100) : 0;
+  const lines = [`📊 <b>Итог дня</b>`, '', `🔥 ${sm.k} из ${goal} ккал (${pct}%)${sm.burn ? ` · сожжено ${sm.burn}` : ''}`, `🥩 Белки ${sm.p} из ${sm.gp} г`, `💧 Вода ${(sm.w / 1000).toFixed(1).replace('.', ',')} из ${(sm.gw / 1000).toFixed(1).replace('.', ',')} л`, ''];
+  if (pct >= 90 && pct <= 110) lines.push('Отличный баланс — так держать 👍');
+  else if (pct < 90) lines.push(`Есть запас ${goal - sm.k} ккал — не забудьте поужинать 🙂`);
+  else lines.push('Немного больше нормы — ничего страшного, завтра новый день 💪');
+  if (sm.gp && sm.p < sm.gp * 0.85) lines.push(`Белка не хватило ~${sm.gp - sm.p} г — добавьте творог, яйца или курицу.`);
+  if (sm.gw && sm.w < sm.gw * 0.7) lines.push('Воды маловато — выпейте стакан перед сном 💧');
+  return lines.join('\n');
+}
+
+// ---------- Еда голосовым или текстом прямо в чат ----------
+async function parseFoodText(env, text) {
+  const sys = 'Ты разбираешь фразу пользователя о съеденной еде. ' +
+    'Ответ — ТОЛЬКО JSON-массив. Элемент: {"name": "продукт в именительном падеже, как в таблице калорийности", "grams": число или 0, "count": число штук или 0, "meal": "b"|"l"|"d"|"s"|null, "kcal": ккал на 100 г, "p": белки на 100 г, "f": жиры на 100 г, "c": углеводы на 100 г}. ' +
+    'meal: b — завтрак, l — обед, d — ужин, s — перекус; null, если не сказано. Если указаны штуки — заполни count, а grams — общий вес. Числа словами переводи в цифры.';
+  const out = await runText(env, [{ role: 'system', content: sys }, { role: 'user', content: String(text).slice(0, 600) }], 500);
+  return cleanItems(extractJSON(out));
+}
+async function handleFoodMessage(env, msg, textIn) {
+  const uid = msg.from.id;
+  if (!env.AI) return send(env, uid, 'Голосовой ввод пока не подключён. Откройте дневник кнопкой «Открыть».');
+  let text = textIn;
+  if (!text) {
+    if (!(await takeQuota(env, uid, 'voice'))) return send(env, uid, 'Лимит голосовых на сегодня исчерпан. Откройте дневник, чтобы добавить вручную.');
+    const fileId = (msg.voice || msg.audio || {}).file_id;
+    const f = await tg(env, 'getFile', { file_id: fileId });
+    if (!f.ok) return send(env, uid, 'Не удалось получить голосовое 😕');
+    const buf = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${f.result.file_path}`).then((r) => r.arrayBuffer());
+    let b64 = '';
+    const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.length; i += 0x8000) b64 += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    b64 = btoa(b64);
+    try {
+      let r;
+      try { r = await env.AI.run('@cf/openai/whisper-large-v3-turbo', { audio: b64, language: 'ru' }); }
+      catch { r = await env.AI.run('@cf/openai/whisper', { audio: [...bytes] }); }
+      text = String((r && r.text) || '').trim();
+    } catch (e) { console.log('bot voice failed', e && e.stack); }
+    if (!text) return send(env, uid, 'Не разобрал голосовое 😕 Попробуйте ещё раз или напишите текстом: <code>+ два яйца и кофе</code>');
+  } else if (!(await takeQuota(env, uid, 'parse'))) return send(env, uid, 'Лимит на сегодня исчерпан.');
+  let items = [];
+  try { items = await parseFoodText(env, text); } catch (e) { console.log('bot parse failed', e && e.stack); }
+  await env.DB.put(`pv:${uid}`, JSON.stringify({ text, items, at: Date.now() }), { expirationTtl: 86400 });
+  const MEAL = { b: 'завтрак', l: 'обед', d: 'ужин', s: 'перекус' };
+  const list = items.length
+    ? items.map((x) => `• ${esc(x.name)}${x.count ? ` × ${x.count}` : ''}${x.grams ? ` — ~${Math.round(x.grams)} г` : ''}${x.kcal && x.grams ? ` (≈${Math.round(x.kcal * x.grams / 100)} ккал)` : ''}`).join('\n')
+    : 'Не удалось выделить продукты — проверьте в приложении.';
+  const meal = items.find((x) => x.meal);
+  await send(env, uid, `${textIn ? '✍️' : '🎙'} «${esc(text)}»\n\n${list}${meal ? `\n\n🍽 ${MEAL[meal.meal]}` : ''}\n\nПроверьте вес и добавьте в дневник 👇`,
+    { reply_markup: { inline_keyboard: [[{ text: '✅ Проверить и добавить', web_app: { url: appUrl(env) + '#pending' } }]] } });
+}
+async function apiPending(req, env) {
+  const { error, user } = await userFromBody(req, env, 10000);
+  if (error) return error;
+  const pv = await env.DB.get(`pv:${user.id}`, 'json');
+  if (pv) await env.DB.delete(`pv:${user.id}`);
+  return json({ ok: true, pending: pv });
+}
+
+// ---------- Голодание: одноразовое уведомление об окончании ----------
+async function apiFast(req, env) {
+  const { error, body, user } = await userFromBody(req, env, 10000);
+  if (error) return error;
+  const uid = String(user.id);
+  const prev = await env.DB.get(`fs:${uid}`);
+  if (prev) {
+    const slot = (await env.DB.get(`ro:${prev}`, 'json')) || {};
+    delete slot[uid];
+    if (Object.keys(slot).length) await env.DB.put(`ro:${prev}`, JSON.stringify(slot)); else await env.DB.delete(`ro:${prev}`);
+    await env.DB.delete(`fs:${uid}`);
+  }
+  const at = Number(body.endAt);
+  if (at && at > Date.now() && at < Date.now() + 48 * 3600e3) {
+    const d = new Date(at);
+    const key = String(d.getUTCHours()).padStart(2, '0') + String(d.getUTCMinutes()).padStart(2, '0');
+    const slot = (await env.DB.get(`ro:${key}`, 'json')) || {};
+    slot[uid] = { type: 'fastEnd', at };
+    await env.DB.put(`ro:${key}`, JSON.stringify(slot));
+    await env.DB.put(`fs:${uid}`, key, { expirationTtl: 3 * 86400 });
+  }
+  return json({ ok: true });
+}
+async function processOneOff(env, budget) {
+  const now = new Date();
+  const key = String(now.getUTCHours()).padStart(2, '0') + String(now.getUTCMinutes()).padStart(2, '0');
+  const slot = await env.DB.get(`ro:${key}`, 'json');
+  if (!slot) return 0;
+  let used = 0, changed = false;
+  for (const [uid, it] of Object.entries(slot)) {
+    if (Math.abs(it.at - now.getTime()) > 5 * 60000) { if (it.at < now.getTime()) { delete slot[uid]; changed = true; } continue; }
+    if (used >= budget) break;
+    await send(env, uid, '⏰ Голодание завершено — окно питания открыто! Начните с белка и овощей 🥗', { reply_markup: openAppKeyboard(env, '🥗 Открыть дневник') });
+    used++; delete slot[uid]; changed = true;
+    await env.DB.delete(`fs:${uid}`);
+  }
+  if (changed) { if (Object.keys(slot).length) await env.DB.put(`ro:${key}`, JSON.stringify(slot)); else await env.DB.delete(`ro:${key}`); }
+  return used;
+}
+
+// ---------- Приглашения ----------
+async function botUsername(env) {
+  const cached = await env.DB.get('bot:me');
+  if (cached) return cached;
+  const r = await tg(env, 'getMe', {});
+  const name = r.ok ? r.result.username : '';
+  if (name) await env.DB.put('bot:me', name, { expirationTtl: 86400 });
+  return name;
+}
+async function apiRef(req, env) {
+  const { error, user } = await userFromBody(req, env, 10000);
+  if (error) return error;
+  const name = await botUsername(env);
+  const count = Number(await env.DB.get(`rc:${user.id}`)) || 0;
+  return json({ ok: true, count, link: name ? `https://t.me/${name}?start=ref_${user.id}` : '', bot: name });
+}
+async function registerReferral(env, newUser, refId) {
+  if (!/^\d+$/.test(refId) || String(refId) === String(newUser.id)) return;
+  const key = `u:${newUser.id}`;
+  const { metadata } = await env.DB.getWithMetadata(key);
+  if (!metadata || metadata.r) return;
+  await env.DB.put(key, '1', { metadata: { ...metadata, r: refId } });
+  const count = (Number(await env.DB.get(`rc:${refId}`)) || 0) + 1;
+  await env.DB.put(`rc:${refId}`, String(count));
+  await send(env, refId, `🎉 По вашему приглашению присоединился ${esc(newUser.first_name || 'друг')}! Всего приглашено: ${count}.`);
+}
+
+// ---------- Челленджи ----------
+const CH_TYPES = { water: '💧 Пить норму воды', log: '📝 Заполнять дневник', protein: '💪 Норма белка', kcal: '🎯 Уложиться в норму калорий', nosweet: '🍬 Без сладкого' };
+const newId = () => Math.random().toString(36).slice(2, 8);
+async function apiChallenge(req, env) {
+  const { error, body, user } = await userFromBody(req, env, 10000);
+  if (error) return error;
+  const uid = String(user.id);
+  const name = String(user.first_name || 'Участник').slice(0, 30);
+  const myKey = `uc:${uid}`;
+  const mine = (await env.DB.get(myKey, 'json')) || [];
+  const load = (id) => env.DB.get(`ch:${id}`, 'json');
+  const save = (c) => env.DB.put(`ch:${c.id}`, JSON.stringify(c), { expirationTtl: 120 * 86400 });
+  const link = async (id) => { const n = await botUsername(env); return n ? `https://t.me/${n}?start=ch_${id}` : ''; };
+  const act = body.action;
+  if (act === 'create') {
+    if (!CH_TYPES[body.type]) return json({ ok: false, error: 'Неизвестный тип' }, 400);
+    if (mine.length >= 10) return json({ ok: false, error: 'Можно участвовать максимум в 10 челленджах' }, 400);
+    const days = [7, 14, 30].includes(Number(body.days)) ? Number(body.days) : 7;
+    const start = /^\d{4}-\d{2}-\d{2}$/.test(body.start || '') ? body.start : today8();
+    const c = { id: newId(), type: body.type, title: CH_TYPES[body.type], days, start, owner: uid, members: { [uid]: { n: name, done: {} } } };
+    await save(c);
+    await env.DB.put(myKey, JSON.stringify([c.id, ...mine]));
+    return json({ ok: true, challenge: c, link: await link(c.id) });
+  }
+  if (act === 'join') {
+    const c = await load(String(body.id || ''));
+    if (!c) return json({ ok: false, error: 'Челлендж не найден или завершён' }, 404);
+    if (!c.members[uid]) {
+      if (Object.keys(c.members).length >= 50) return json({ ok: false, error: 'В челлендже уже 50 участников' }, 400);
+      c.members[uid] = { n: name, done: {} };
+      await save(c);
+      if (c.owner !== uid) await send(env, c.owner, `🏁 ${esc(name)} присоединился к челленджу «${esc(c.title)}»!`);
+    }
+    if (!mine.includes(c.id)) await env.DB.put(myKey, JSON.stringify([c.id, ...mine].slice(0, 10)));
+    return json({ ok: true, challenge: c, link: await link(c.id) });
+  }
+  if (act === 'mark') {
+    const c = await load(String(body.id || ''));
+    if (!c || !c.members[uid]) return json({ ok: false, error: 'Нет такого челленджа' }, 404);
+    const date = String(body.date || '');
+    const s = new Date(c.start + 'T00:00:00Z'), d = new Date(date + 'T00:00:00Z');
+    const idx = Math.round((d - s) / 86400e3);
+    if (!(idx >= 0 && idx < c.days)) return json({ ok: false, error: 'Дата вне челленджа' }, 400);
+    const done = c.members[uid].done;
+    if (body.done) done[date] = 1; else delete done[date];
+    await save(c);
+    return json({ ok: true, challenge: c });
+  }
+  if (act === 'leave') {
+    const c = await load(String(body.id || ''));
+    if (c && c.members[uid]) { delete c.members[uid]; if (Object.keys(c.members).length) await save(c); else await env.DB.delete(`ch:${c.id}`); }
+    await env.DB.put(myKey, JSON.stringify(mine.filter((x) => x !== body.id)));
+    return json({ ok: true });
+  }
+  // list
+  const list = [];
+  for (const id of mine) { const c = await load(id); if (c) list.push({ ...c, link: await link(id) }); }
+  if (list.length !== mine.length) await env.DB.put(myKey, JSON.stringify(list.map((c) => c.id)));
+  return json({ ok: true, list });
+}
+
+// ---------- Картинка в чат (итоги недели) ----------
+async function apiSharePhoto(req, env) {
+  const { error, body, user } = await userFromBody(req, env, 3_000_000);
+  if (error) return error;
+  const b64 = String(body.image || '').replace(/^data:image\/\w+;base64,/, '');
+  if (b64.length < 1000) return json({ ok: false, error: 'Нет изображения' }, 400);
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const fd = new FormData();
+  fd.append('chat_id', String(user.id));
+  fd.append('caption', String(body.caption || '').slice(0, 900));
+  fd.append('photo', new Blob([bytes], { type: 'image/png' }), 'week.png');
+  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`, { method: 'POST', body: fd }).then((x) => x.json());
+  if (!r.ok) return json({ ok: false, error: r.error_code === 403 ? 'Сначала нажмите «Старт» в чате с ботом' : (r.description || 'Не удалось отправить') }, 502);
+  return json({ ok: true });
+}
+
+// ---------- Сегменты рассылки ----------
+const SEGMENTS = {
+  all: ['Всем', () => true],
+  inactive: ['Неактивным 7+ дней', (u, now) => now - (u.m.s || 0) > 7 * 86400e3],
+  new: ['Новым за 7 дней', (u, now) => now - (u.m.j || 0) < 7 * 86400e3],
+  active: ['Активным за 7 дней', (u, now) => now - (u.m.s || 0) < 7 * 86400e3],
+  app: ['Кто открывал приложение', (u) => (u.m.o || 0) > 0],
+};
